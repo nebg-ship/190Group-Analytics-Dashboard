@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>190 Group - CEO Dashboard</title>
+    <link rel="stylesheet" href="css/dashboard.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-content">
+                <h1>190 Group Analytics</h1>
+                <p class="subtitle">CEO Dashboard</p>
+            </div>
+            <div class="header-actions">
+                <div class="filter-group">
+                    <label>Channel:</label>
+                    <div class="channel-filter">
+                        <button class="channel-btn active" data-channel="all">All Channels</button>
+                        <button class="channel-btn" data-channel="amazon">Amazon Only</button>
+                        <button class="channel-btn" data-channel="bonsai">Bonsai Only</button>
+                    </div>
+                </div>
+                <div class="filter-group">
+                    <label>Time Period:</label>
+                    <div class="time-filter">
+                        <button class="filter-btn active" data-weeks="4">Last 4 Weeks</button>
+                        <button class="filter-btn" data-weeks="12">Last 12 Weeks</button>
+                        <button class="filter-btn" data-weeks="ytd">YTD</button>
+                    </div>
+                </div>
+                <div class="last-updated" id="lastUpdated">Loading...</div>
+            </div>
+        </header>
+
+        <!-- Loading State -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="spinner"></div>
+            <p>Loading dashboard data...</p>
+        </div>
+
+        <!-- Error State -->
+        <div class="error-message" id="errorMessage" style="display: none;">
+            <p>Failed to load dashboard data. Please try again.</p>
+            <button onclick="location.reload()">Retry</button>
+        </div>
+
+        <!-- KPI Cards -->
+        <section class="kpi-section">
+            <div class="kpi-card">
+                <div class="kpi-icon">💰</div>
+                <div class="kpi-content">
+                    <h3>Total Revenue</h3>
+                    <p class="kpi-value" id="totalRevenue">$0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="revenueChange">-</p>
+                        <p class="kpi-prev" id="revenuePrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-icon">📈</div>
+                <div class="kpi-content">
+                    <h3>WoW Growth</h3>
+                    <p class="kpi-value" id="wowGrowth">0%</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="wowChange">-</p>
+                        <p class="kpi-prev" id="wowPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-icon">📅</div>
+                <div class="kpi-content">
+                    <h3>YoY Growth</h3>
+                    <p class="kpi-value" id="yoyGrowth">0%</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="yoyChange">-</p>
+                        <p class="kpi-prev" id="yoyPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-icon">🛒</div>
+                <div class="kpi-content">
+                    <h3>Bonsai Orders</h3>
+                    <p class="kpi-value" id="bonsaiOrders">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="ordersChange">-</p>
+                        <p class="kpi-prev" id="ordersPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-icon">📦</div>
+                <div class="kpi-content">
+                    <h3>Amazon Units</h3>
+                    <p class="kpi-value" id="amazonUnits">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="unitsChange">-</p>
+                        <p class="kpi-prev" id="unitsPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-icon">💳</div>
+                <div class="kpi-content">
+                    <h3>Avg Order Value</h3>
+                    <p class="kpi-value" id="avgOrderValue">$0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="aovChange">-</p>
+                        <p class="kpi-prev" id="aovPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-icon">💵</div>
+                <div class="kpi-content">
+                    <h3>Amazon Margin</h3>
+                    <p class="kpi-value" id="amazonMargin">0%</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="marginChange">-</p>
+                        <p class="kpi-prev" id="marginPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card">
+                <div class="kpi-icon">👥</div>
+                <div class="kpi-content">
+                    <h3>Customers</h3>
+                    <p class="kpi-value" id="customers">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="customersChange">-</p>
+                        <p class="kpi-prev" id="customersPrev">-</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Charts Section -->
+        <section class="charts-section">
+            <div class="chart-card large">
+                <h3>Revenue Trend</h3>
+                <canvas id="revenueTrendChart"></canvas>
+            </div>
+
+            <div class="chart-card">
+                <h3>Channel Mix</h3>
+                <canvas id="channelMixChart"></canvas>
+            </div>
+
+            <div class="chart-card">
+                <h3>Week-over-Week Growth</h3>
+                <canvas id="wowGrowthChart"></canvas>
+            </div>
+
+            <div class="chart-card large">
+                <h3>Year-over-Year Comparison</h3>
+                <canvas id="yoyComparisonChart"></canvas>
+            </div>
+        </section>
+    </div>
+
+    <script src="js/dashboard.js"></script>
+</body>
+
+</html>
