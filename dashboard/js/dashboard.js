@@ -90,6 +90,17 @@ function updateDashboard() {
 function updateKPIs(data) {
     if (data.length === 0) return;
 
+    // Handle card visibility based on channel filter
+    const cards = document.querySelectorAll('.kpi-card');
+    cards.forEach(card => {
+        const cardChannel = card.dataset.channel;
+        if (currentChannelFilter === 'all' || cardChannel === 'all' || cardChannel === currentChannelFilter) {
+            card.classList.remove('hidden');
+        } else {
+            card.classList.add('hidden');
+        }
+    });
+
     const latest = data[0];
     const previous = dashboardData[dashboardData.indexOf(latest) + 1] || latest;
 
@@ -124,6 +135,11 @@ function updateKPIs(data) {
         prevTotalRevenue = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_revenue || 0), 0);
         latestRevenue = latest.bonsai_revenue || 0;
         previousRevenueForWow = previous.bonsai_revenue || 0;
+    } else if (currentChannelFilter === 'wholesale') {
+        totalRevenue = data.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
+        prevTotalRevenue = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
+        latestRevenue = latest.wholesale_revenue || 0;
+        previousRevenueForWow = previous.wholesale_revenue || 0;
     } else {
         totalRevenue = data.reduce((sum, d) => sum + (d.total_company_revenue || 0), 0);
         prevTotalRevenue = prevPeriodData.reduce((sum, d) => sum + (d.total_company_revenue || 0), 0);
@@ -163,17 +179,31 @@ function updateKPIs(data) {
     document.getElementById('yoyPrev').textContent = isYTD ? `2025: ${formatCurrency(prevTotalRevenue)}` : `LY: ${formatCurrency(prevTotalRevenue)}`;
 
     // Bonsai Orders
-    if (currentChannelFilter === 'amazon') {
+    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
         document.getElementById('bonsaiOrders').textContent = 'N/A';
         updateChangeElement('ordersChange', 0);
         document.getElementById('ordersPrev').textContent = '';
     } else {
-        totalBonsaiOrders = data.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
-        prevTotalBonsaiOrders = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
+        const totalBonsaiOrders = data.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
+        const prevTotalBonsaiOrders = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
         document.getElementById('bonsaiOrders').textContent = formatNumber(totalBonsaiOrders);
         const ordersChange = isYTD ? (totalBonsaiOrders - prevTotalBonsaiOrders) : (latest.bonsai_orders - (previous.bonsai_orders || latest.bonsai_orders));
         updateChangeElement('ordersChange', ordersChange, isYTD ? 'vs LY' : '');
         document.getElementById('ordersPrev').textContent = isYTD ? `LY: ${formatNumber(prevTotalBonsaiOrders)}` : `Prev: ${formatNumber(previous.bonsai_orders)}`;
+    }
+
+    // Wholesale Orders
+    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'bonsai') {
+        document.getElementById('wholesaleOrders').textContent = 'N/A';
+        updateChangeElement('wholesaleOrdersChange', 0);
+        document.getElementById('wholesaleOrdersPrev').textContent = '';
+    } else {
+        const totalWholesaleOrders = data.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
+        const prevWholesaleOrders = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
+        document.getElementById('wholesaleOrders').textContent = formatNumber(totalWholesaleOrders);
+        const ordersChange = isYTD ? (totalWholesaleOrders - prevWholesaleOrders) : (latest.wholesale_orders - (previous.wholesale_orders || latest.wholesale_orders));
+        updateChangeElement('wholesaleOrdersChange', ordersChange, isYTD ? 'vs LY' : '');
+        document.getElementById('wholesaleOrdersPrev').textContent = isYTD ? `LY: ${formatNumber(prevWholesaleOrders)}` : `Prev: ${formatNumber(previous.wholesale_orders)}`;
     }
 
     // Amazon Units
@@ -190,11 +220,56 @@ function updateKPIs(data) {
         document.getElementById('unitsPrev').textContent = isYTD ? `LY: ${formatNumber(prevTotalAmazonUnits)}` : `Prev: ${formatNumber(previous.amazon_units)}`;
     }
 
+    // Amazon Sessions
+    if (currentChannelFilter === 'bonsai') {
+        document.getElementById('amazonSessions').textContent = 'N/A';
+        updateChangeElement('sessionsChange', 0);
+        document.getElementById('sessionsPrev').textContent = '';
+    } else {
+        const totalSessions = data.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
+        const prevSessions = prevPeriodData.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
+        document.getElementById('amazonSessions').textContent = formatNumber(totalSessions);
+        const sessionsChange = isYTD ? (totalSessions - prevSessions) : (latest.amazon_sessions - (previous.amazon_sessions || latest.amazon_sessions));
+        updateChangeElement('sessionsChange', sessionsChange, isYTD ? 'vs LY' : '');
+        document.getElementById('sessionsPrev').textContent = isYTD ? `LY: ${formatNumber(prevSessions)}` : `Prev: ${formatNumber(previous.amazon_sessions)}`;
+    }
+
+    // Amazon Conv Rate
+    if (currentChannelFilter === 'bonsai') {
+        document.getElementById('amazonConvRate').textContent = 'N/A';
+        updateChangeElement('cvrChange', 0);
+        document.getElementById('cvrPrev').textContent = '';
+    } else {
+        const totalUnits = data.reduce((sum, d) => sum + (d.amazon_units || 0), 0);
+        const totalSessions = data.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
+        const periodCVR = totalSessions > 0 ? (totalUnits / totalSessions) * 100 : 0;
+
+        const prevUnits = prevPeriodData.reduce((sum, d) => sum + (d.amazon_units || 0), 0);
+        const prevSessions = prevPeriodData.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
+        const prevCVR = prevSessions > 0 ? (prevUnits / prevSessions) * 100 : 0;
+
+        document.getElementById('amazonConvRate').textContent = formatPercent(periodCVR);
+        const cvrChange = isYTD ? (periodCVR - prevCVR) : ((latest.amazon_cvr || 0) - (previous.amazon_cvr || 0));
+        updateChangeElement('cvrChange', cvrChange, isYTD ? 'pp LY' : 'pp');
+        document.getElementById('cvrPrev').textContent = isYTD ? `LY: ${formatPercent(prevCVR)}` : `Prev: ${formatPercent(previous.amazon_cvr)}`;
+    }
+
     // Average Order Value
     if (currentChannelFilter === 'amazon') {
         document.getElementById('avgOrderValue').textContent = 'N/A';
         updateChangeElement('aovChange', 0);
         document.getElementById('aovPrev').textContent = '';
+    } else if (currentChannelFilter === 'wholesale') {
+        const totalWholesaleRev = data.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
+        const orders = data.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
+        const periodAOV = orders > 0 ? totalWholesaleRev / orders : 0;
+        const prevWholesaleRev = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
+        const prevOrders = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
+        const prevAOV = prevOrders > 0 ? prevWholesaleRev / prevOrders : 0;
+        document.getElementById('avgOrderValue').textContent = formatCurrency(periodAOV);
+        const aovChange = isYTD ? (periodAOV - prevAOV) : (latest.wholesale_aov - (previous.wholesale_aov || latest.wholesale_aov));
+        updateChangeElement('aovChange', aovChange, isYTD ? 'vs LY' : '');
+        document.getElementById('aovPrev').textContent = isYTD ? `LY: ${formatCurrency(prevAOV)}` : `Prev: ${formatCurrency(previous.wholesale_aov)}`;
     } else {
         const totalBonsaiRev = data.reduce((sum, d) => sum + (d.bonsai_revenue || 0), 0);
         const orders = data.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
@@ -230,6 +305,21 @@ function updateKPIs(data) {
         document.getElementById('marginPrev').textContent = isYTD ? `LY: ${formatPercent(prevMargin)}` : `Prev: ${formatPercent(previous.amazon_margin_pct)}`;
     }
 
+    // Amazon Net Proceeds
+    if (currentChannelFilter === 'bonsai') {
+        document.getElementById('amazonNetProceeds').textContent = 'N/A';
+        updateChangeElement('netProceedsChange', 0);
+        document.getElementById('netProceedsPrev').textContent = '';
+    } else {
+        totalAmazonNet = data.reduce((sum, d) => sum + (d.amazon_net_proceeds || 0), 0);
+        prevTotalAmazonNet = prevPeriodData.reduce((sum, d) => sum + (d.amazon_net_proceeds || 0), 0);
+
+        document.getElementById('amazonNetProceeds').textContent = formatCurrency(totalAmazonNet);
+        const netChange = isYTD ? (totalAmazonNet - prevTotalAmazonNet) : (latest.amazon_net_proceeds - (previous.amazon_net_proceeds || latest.amazon_net_proceeds));
+        updateChangeElement('netProceedsChange', netChange, isYTD ? 'vs LY' : '');
+        document.getElementById('netProceedsPrev').textContent = isYTD ? `LY: ${formatCurrency(prevTotalAmazonNet)}` : `Prev: ${formatCurrency(previous.amazon_net_proceeds)}`;
+    }
+
     // Customers
     if (currentChannelFilter === 'amazon') {
         document.getElementById('customers').textContent = 'N/A';
@@ -242,6 +332,40 @@ function updateKPIs(data) {
         const custChange = isYTD ? (totalBonsaiCustomers - prevTotalBonsaiCustomers) : (latest.bonsai_customers - (previous.bonsai_customers || latest.bonsai_customers));
         updateChangeElement('customersChange', custChange, isYTD ? 'vs LY' : '');
         document.getElementById('customersPrev').textContent = isYTD ? `LY: ${formatNumber(prevTotalBonsaiCustomers)}` : `Prev: ${formatNumber(previous.bonsai_customers)}`;
+    }
+
+    // Bonsai Sessions (from GA4)
+    if (currentChannelFilter === 'amazon') {
+        document.getElementById('bonsaiSessions').textContent = 'N/A';
+        updateChangeElement('bonsaiSessionsChange', 0);
+        document.getElementById('bonsaiSessionsPrev').textContent = '';
+    } else {
+        const totalBonsaiSessions = data.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
+        const prevBonsaiSessions = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
+        document.getElementById('bonsaiSessions').textContent = formatNumber(totalBonsaiSessions);
+        const sessionsChange = isYTD ? (totalBonsaiSessions - prevBonsaiSessions) : ((latest.bonsai_sessions || 0) - (previous.bonsai_sessions || 0));
+        updateChangeElement('bonsaiSessionsChange', sessionsChange, isYTD ? 'vs LY' : '');
+        document.getElementById('bonsaiSessionsPrev').textContent = isYTD ? `LY: ${formatNumber(prevBonsaiSessions)}` : `Prev: ${formatNumber(previous.bonsai_sessions)}`;
+    }
+
+    // Bonsai Conv Rate (from GA4)
+    if (currentChannelFilter === 'amazon') {
+        document.getElementById('bonsaiConvRate').textContent = 'N/A';
+        updateChangeElement('bonsaiCvrChange', 0);
+        document.getElementById('bonsaiCvrPrev').textContent = '';
+    } else {
+        const totalOrders = data.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
+        const totalSessions = data.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
+        const periodCVR = totalSessions > 0 ? (totalOrders / totalSessions) * 100 : 0;
+
+        const prevOrders = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
+        const prevSessions = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
+        const prevCVR = prevSessions > 0 ? (prevOrders / prevSessions) * 100 : 0;
+
+        document.getElementById('bonsaiConvRate').textContent = formatPercent(periodCVR);
+        const cvrChange = isYTD ? (periodCVR - prevCVR) : ((latest.bonsai_cvr || 0) - (previous.bonsai_cvr || 0));
+        updateChangeElement('bonsaiCvrChange', cvrChange, isYTD ? 'pp LY' : 'pp');
+        document.getElementById('bonsaiCvrPrev').textContent = isYTD ? `LY: ${formatPercent(prevCVR)}` : `Prev: ${formatPercent(previous.bonsai_cvr)}`;
     }
 }
 
@@ -306,6 +430,14 @@ function updateRevenueTrendChart(data) {
                 backgroundColor: 'rgba(245, 158, 11, 0.1)',
                 tension: 0.4,
                 fill: true
+            },
+            {
+                label: 'Wholesale Revenue',
+                data: data.map(d => d.wholesale_revenue || 0),
+                borderColor: '#8b5cf6',
+                backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                tension: 0.4,
+                fill: true
             }
         ];
     } else if (currentChannelFilter === 'amazon') {
@@ -315,6 +447,17 @@ function updateRevenueTrendChart(data) {
                 data: data.map(d => d.amazon_revenue || 0),
                 borderColor: '#f59e0b',
                 backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                tension: 0.4,
+                fill: true
+            }
+        ];
+    } else if (currentChannelFilter === 'wholesale') {
+        datasets = [
+            {
+                label: 'Wholesale Revenue',
+                data: data.map(d => d.wholesale_revenue || 0),
+                borderColor: '#8b5cf6',
+                backgroundColor: 'rgba(139, 92, 246, 0.1)',
                 tension: 0.4,
                 fill: true
             }
@@ -364,6 +507,11 @@ function updateChannelMixChart(data) {
                     label: 'Amazon',
                     data: data.map(d => d.amazon_revenue || 0),
                     backgroundColor: '#f59e0b'
+                },
+                {
+                    label: 'Wholesale',
+                    data: data.map(d => d.wholesale_revenue || 0),
+                    backgroundColor: '#8b5cf6'
                 }
             ]
         },
@@ -378,7 +526,7 @@ function updateChannelMixChart(data) {
     });
 }
 
-// WoW Growth Chart
+// YoY Growth Chart (compares each week to the same week last year)
 function updateWowGrowthChart(data) {
     const ctx = document.getElementById('wowGrowthChart');
 
@@ -386,19 +534,26 @@ function updateWowGrowthChart(data) {
         charts.wowGrowth.destroy();
     }
 
-    const wowData = data.map((d, i) => {
-        if (i === 0) return 0;
+    const yoyData = data.map((d) => {
+        // Find the same week from last year (364 days ago)
+        const currentWeekDate = new Date(d.week_start + 'T00:00:00Z');
+        const targetDate = new Date(currentWeekDate);
+        targetDate.setUTCDate(targetDate.getUTCDate() - 364);
+        const targetStr = targetDate.toISOString().split('T')[0];
+
+        const lastYearWeek = dashboardData.find(w => w.week_start === targetStr);
+        if (!lastYearWeek) return 0;
 
         let current, previous;
         if (currentChannelFilter === 'amazon') {
             current = d.amazon_revenue || 0;
-            previous = data[i - 1].amazon_revenue || 0;
+            previous = lastYearWeek.amazon_revenue || 0;
         } else if (currentChannelFilter === 'bonsai') {
             current = d.bonsai_revenue || 0;
-            previous = data[i - 1].bonsai_revenue || 0;
+            previous = lastYearWeek.bonsai_revenue || 0;
         } else {
             current = d.total_company_revenue || 0;
-            previous = data[i - 1].total_company_revenue || 0;
+            previous = lastYearWeek.total_company_revenue || 0;
         }
 
         return calculatePercentChange(current, previous);
@@ -409,9 +564,9 @@ function updateWowGrowthChart(data) {
         data: {
             labels: data.map(d => formatDate(d.week_start)),
             datasets: [{
-                label: 'WoW Growth %',
-                data: wowData,
-                backgroundColor: wowData.map(v => v >= 0 ? '#10b981' : '#ef4444')
+                label: 'YoY Growth %',
+                data: yoyData,
+                backgroundColor: yoyData.map(v => v >= 0 ? '#10b981' : '#ef4444')
             }]
         },
         options: getChartOptions('Growth %')
@@ -536,6 +691,7 @@ function updateChangeElement(elementId, value, suffix = '') {
 }
 
 function formatCurrency(value) {
+    if (value === null || value === undefined) return '$0';
     return new Intl.NumberFormat('en-US', {
         style: 'currency',
         currency: 'USD',
@@ -545,10 +701,12 @@ function formatCurrency(value) {
 }
 
 function formatNumber(value) {
+    if (value === null || value === undefined) return '0';
     return new Intl.NumberFormat('en-US').format(Math.round(value));
 }
 
 function formatPercent(value) {
+    if (value === null || value === undefined) return '0.0%';
     return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
 }
 

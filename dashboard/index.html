@@ -24,6 +24,7 @@
                         <button class="channel-btn active" data-channel="all">All Channels</button>
                         <button class="channel-btn" data-channel="amazon">Amazon Only</button>
                         <button class="channel-btn" data-channel="bonsai">Bonsai Only</button>
+                        <button class="channel-btn" data-channel="wholesale">Wholesale Only</button>
                     </div>
                 </div>
                 <div class="filter-group">
@@ -52,7 +53,7 @@
 
         <!-- KPI Cards -->
         <section class="kpi-section">
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="all">
                 <div class="kpi-icon">💰</div>
                 <div class="kpi-content">
                     <h3>Total Revenue</h3>
@@ -64,7 +65,7 @@
                 </div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="all">
                 <div class="kpi-icon">📈</div>
                 <div class="kpi-content">
                     <h3>WoW Growth</h3>
@@ -76,7 +77,7 @@
                 </div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="all">
                 <div class="kpi-icon">📅</div>
                 <div class="kpi-content">
                     <h3>YoY Growth</h3>
@@ -88,7 +89,7 @@
                 </div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="bonsai">
                 <div class="kpi-icon">🛒</div>
                 <div class="kpi-content">
                     <h3>Bonsai Orders</h3>
@@ -100,7 +101,7 @@
                 </div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="amazon">
                 <div class="kpi-icon">📦</div>
                 <div class="kpi-content">
                     <h3>Amazon Units</h3>
@@ -112,7 +113,43 @@
                 </div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="wholesale">
+                <div class="kpi-icon">🏢</div>
+                <div class="kpi-content">
+                    <h3>Wholesale Orders</h3>
+                    <p class="kpi-value" id="wholesaleOrders">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="wholesaleOrdersChange">-</p>
+                        <p class="kpi-prev" id="wholesaleOrdersPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="amazon">
+                <div class="kpi-icon">🖱️</div>
+                <div class="kpi-content">
+                    <h3>Amazon Sessions</h3>
+                    <p class="kpi-value" id="amazonSessions">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="sessionsChange">-</p>
+                        <p class="kpi-prev" id="sessionsPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="amazon">
+                <div class="kpi-icon">🎯</div>
+                <div class="kpi-content">
+                    <h3>Amazon Conv Rate</h3>
+                    <p class="kpi-value" id="amazonConvRate">0%</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="cvrChange">-</p>
+                        <p class="kpi-prev" id="cvrPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="all">
                 <div class="kpi-icon">💳</div>
                 <div class="kpi-content">
                     <h3>Avg Order Value</h3>
@@ -124,7 +161,7 @@
                 </div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="amazon">
                 <div class="kpi-icon">💵</div>
                 <div class="kpi-content">
                     <h3>Amazon Margin</h3>
@@ -136,7 +173,19 @@
                 </div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card" data-channel="amazon">
+                <div class="kpi-icon">💰</div>
+                <div class="kpi-content">
+                    <h3>Amazon Net Proceeds</h3>
+                    <p class="kpi-value" id="amazonNetProceeds">$0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="netProceedsChange">-</p>
+                        <p class="kpi-prev" id="netProceedsPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="bonsai">
                 <div class="kpi-icon">👥</div>
                 <div class="kpi-content">
                     <h3>Customers</h3>
@@ -144,6 +193,30 @@
                     <div class="kpi-meta">
                         <p class="kpi-change" id="customersChange">-</p>
                         <p class="kpi-prev" id="customersPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="bonsai">
+                <div class="kpi-icon">🌐</div>
+                <div class="kpi-content">
+                    <h3>Bonsai Sessions</h3>
+                    <p class="kpi-value" id="bonsaiSessions">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="bonsaiSessionsChange">-</p>
+                        <p class="kpi-prev" id="bonsaiSessionsPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="bonsai">
+                <div class="kpi-icon">🎯</div>
+                <div class="kpi-content">
+                    <h3>Bonsai Conv Rate</h3>
+                    <p class="kpi-value" id="bonsaiConvRate">0%</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="bonsaiCvrChange">-</p>
+                        <p class="kpi-prev" id="bonsaiCvrPrev">-</p>
                     </div>
                 </div>
             </div>
@@ -162,7 +235,7 @@
             </div>
 
             <div class="chart-card">
-                <h3>Week-over-Week Growth</h3>
+                <h3>Year-over-Year Growth</h3>
                 <canvas id="wowGrowthChart"></canvas>
             </div>
 

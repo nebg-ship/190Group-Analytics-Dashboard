@@ -7,13 +7,14 @@ import logging
 import argparse
 import subprocess
 import tempfile
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from io import BytesIO
 
 import requests
 from requests_aws4auth import AWS4Auth
 from dotenv import load_dotenv
 from google.cloud import storage
+from google.cloud import bigquery
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -72,42 +73,41 @@ def get_aws_auth(service="execute-api"):
 def create_economics_query(start_date, end_date):
     query = f"""
     query {{
-      analytics_economics_2024_03_15(
-        customerId: "amzn1.ask.skill.1" 
-        startDateTime: "{start_date.isoformat()}"
-        endDateTime: "{end_date.isoformat()}"
-        aggregateBy: [DATE, PRODUCT]
-      ) {{
-        date
-        product {{
-            sku
-            asin
-        }}
-        sales {{
-            grossSales {{
-                amount
-                currencyCode
+      analytics_economics_2024_03_15 {{
+        economics(
+          startDate: "{start_date.isoformat()}"
+          endDate: "{end_date.isoformat()}"
+          marketplaceIds: ["ATVPDKIKX0DER"]
+        ) {{
+            startDate
+            endDate
+            msku
+            childAsin
+            fnsku
+            marketplaceId
+            sales {{
+                unitsOrdered
+                orderedProductSales {{ amount }}
+                refundedProductSales {{ amount }}
+                netProductSales {{ amount }}
             }}
-            unitsOrdered
-            refunds {{
-                amount
+            fees {{
+                feeTypeName
+                charges {{
+                    aggregatedDetail {{
+                        totalAmount {{ amount }}
+                    }}
+                }}
             }}
-            netSales {{
-                amount
+            ads {{
+                adTypeName
+                charge {{
+                    totalAmount {{ amount }}
+                }}
             }}
-        }}
-        fees {{
-            totalFees {{
-                amount
+            netProceeds {{
+                total {{ amount }}
             }}
-        }}
-        advertising {{
-            spend {{
-                amount
-            }}
-        }}
-        netProceeds {{
-            amount
         }}
       }}
     }}
@@ -177,12 +177,17 @@ def wait_for_query(query_id):
         )
         resp.raise_for_status()
         data = resp.json()
-        status = data["status"]
+        status = data.get("processingStatus")
         
         if status == "DONE":
-            return data["documentId"]
+            doc_id = data.get("dataDocumentId")
+            if not doc_id:
+                logger.error(f"Query DONE but dataDocumentId missing! Response: {data}")
+                raise Exception("dataDocumentId missing in DONE response")
+            return doc_id
         elif status in ["CANCELLED", "FATAL", "FAILED"]:
-            raise Exception(f"Query failed with status: {status} - {data.get('errorList')}")
+            logger.error(f"Query failed: {data}")
+            raise Exception(f"Query failed with status: {status} - {data.get('errors')}")
         
         logger.info(f"Status: {status}. Sleeping 15s...")
         time.sleep(15)
@@ -199,7 +204,11 @@ def download_document(document_id):
     )
     resp.raise_for_status()
     doc_info = resp.json()
-    download_url = doc_info["documentUrl"]
+    print(f"DEBUG - Document Info: {doc_info}")
+    download_url = doc_info.get("documentUrl") or doc_info.get("url")
+    if not download_url:
+        logger.error(f"Failed to find download URL in doc_info: {doc_info}")
+        raise Exception("Download URL missing")
     
     logger.info("Downloading content...")
     content_resp = requests.get(download_url)
@@ -217,42 +226,25 @@ def upload_to_gcs(content_bytes, run_date, document_id):
     logger.info(f"Uploaded to gs://{GCS_BUCKET}/{blob_path}")
     return f"gs://{GCS_BUCKET}/{blob_path}"
 
-def run_bq_command(args, input_data=None):
-    """Run a bq command via subprocess."""
-    cmd = ["bq", "--headless", "--format=json"] + args
-    logger.info(f"Running BQ command: {' '.join(cmd)}")
-    result = subprocess.run(
-        cmd, 
-        input=input_data.encode('utf-8') if input_data else None,
-        capture_output=True, 
-        text=True
-    )
-    if result.returncode != 0:
-        logger.error(f"BQ Command Failed: {result.stderr}")
-        raise Exception(f"BQ Command Failed: {result.stderr}")
-    return result.stdout
-
-def transform_and_load_bq(gcs_uri, start_date, end_date):
+def transform_and_load_bq(gcs_uri, start_date, end_date, query_id, doc_id):
     """
-    Loads data using 'bq load' and 'bq query'.
+    Loads data using BigQuery Python SDK.
     """
-    staging_table_id = f"{GCP_PROJECT}:{BQ_DATASET}.stg_amazon_economics_raw"
+    client = bigquery.Client(project=GCP_PROJECT)
+    staging_table_id = f"{GCP_PROJECT}.{BQ_DATASET}.stg_amazon_economics_raw"
     fact_table_id = f"{GCP_PROJECT}.{BQ_DATASET}.fact_sku_day_us"
     
     logger.info(f"Loading {gcs_uri} into staging table {staging_table_id}")
     
     # 1. Load to Staging
-    # bq load --autodetect --source_format=NEWLINE_DELIMITED_JSON --replace <table_id> <uri>
-    load_args = [
-        "load",
-        "--autodetect",
-        "--source_format=NEWLINE_DELIMITED_JSON",
-        "--replace", # WRITE_TRUNCATE
-        "--ignore_unknown_values",
-        staging_table_id,
-        gcs_uri
-    ]
-    run_bq_command(load_args)
+    job_config = bigquery.LoadJobConfig(
+        autodetect=True,
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        ignore_unknown_values=True
+    )
+    load_job = client.load_table_from_uri(gcs_uri, staging_table_id, job_config=job_config)
+    load_job.result()
     logger.info("Staging load complete.")
 
     # 2. Cleanup Target Range (DELETE)
@@ -261,15 +253,17 @@ def transform_and_load_bq(gcs_uri, start_date, end_date):
         DELETE FROM `{fact_table_id}` 
         WHERE business_date BETWEEN '{start_date}' AND '{end_date}'
     """
-    run_bq_command(["query", "--use_legacy_sql=false", delete_query])
+    client.query(delete_query).result()
 
     # 3. Insert Transformed Data (INSERT)
     logger.info(f"Inserting transformed data into {fact_table_id}")
     insert_query = f"""
         INSERT INTO `{fact_table_id}` (
             business_date, 
+            marketplace,
             msku, 
             asin, 
+            fnsku,
             units, 
             gross_sales, 
             refunds, 
@@ -277,58 +271,60 @@ def transform_and_load_bq(gcs_uri, start_date, end_date):
             amazon_fees, 
             ad_spend, 
             net_proceeds,
+            source_query_id,
+            source_document_id,
             ingested_at
         )
         SELECT
-            CAST(date AS DATE) as business_date,
-            product.sku as msku,
-            product.asin as asin,
-            sales.unitsOrdered as units,
-            sales.grossSales.amount as gross_sales,
-            sales.refunds.amount as refunds,
-            sales.netSales.amount as net_sales,
-            fees.totalFees.amount as amazon_fees,
-            advertising.spend.amount as ad_spend,
-            netProceeds.amount as net_proceeds,
+            CAST(startDate AS DATE) as business_date,
+            marketplaceId as marketplace,
+            msku,
+            childAsin as asin,
+            fnsku,
+            CAST(sales.unitsOrdered AS INT64) as units,
+            CAST(IFNULL(sales.orderedProductSales.amount, 0.0) AS NUMERIC) as gross_sales,
+            CAST(IFNULL(sales.refundedProductSales.amount, 0.0) AS NUMERIC) as refunds,
+            CAST(IFNULL(sales.netProductSales.amount, 0.0) AS NUMERIC) as net_sales,
+            CAST(IFNULL((SELECT SUM(charge.aggregatedDetail.totalAmount.amount) FROM UNNEST(fees) AS f, UNNEST(f.charges) AS charge), 0.0) AS NUMERIC) as amazon_fees,
+            CAST(IFNULL((SELECT SUM(ad.charge.totalAmount.amount) FROM UNNEST(ads) AS ad), 0.0) AS NUMERIC) as ad_spend,
+            CAST(IFNULL(netProceeds.total.amount, 0.0) AS NUMERIC) as net_proceeds,
+            '{query_id}' as source_query_id,
+            '{doc_id}' as source_document_id,
             CURRENT_TIMESTAMP() as ingested_at
-        FROM `{staging_table_id.replace(':', '.')}`
+        FROM `{staging_table_id}`
     """
-    run_bq_command(["query", "--use_legacy_sql=false", insert_query])
-    logger.info("Merge complete.")
+    query_job = client.query(insert_query)
+    query_job.result()
+    
+    # Get row count
+    return query_job.num_dml_affected_rows or 0
 
-    # Get row count as a bonus (optional)
-    return 0 
 
 def log_etl_run(run_date, status, query_id, doc_id, row_count, error_msg=None):
+    client = bigquery.Client(project=GCP_PROJECT)
+    table_id = f"{GCP_PROJECT}.{BQ_DATASET}.etl_runs"
+    
+    row = {
+        "run_date": run_date.isoformat(),
+        "status": status,
+        "query_id": query_id,
+        "document_id": doc_id,
+        "row_count": row_count,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "error": str(error_msg)[:1000] if error_msg else None
+    }
+    
     try:
-        table_id = f"{GCP_PROJECT}:{BQ_DATASET}.etl_runs"
-        
-        row = {
-            "run_date": run_date.isoformat(),
-            "status": status,
-            "query_id": query_id,
-            "document_id": doc_id,
-            "row_count": row_count,
-            "started_at": datetime.utcnow().isoformat(), 
-            "finished_at": datetime.utcnow().isoformat(),
-            "error": str(error_msg) if error_msg else None
-        }
-        
-        # Write to temp file
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
-            json.dump(row, tmp)
-            tmp_path = tmp.name
-            
-        # bq insert
-        run_bq_command(["insert", table_id, tmp_path])
-        os.remove(tmp_path)
-            
+        errors = client.insert_rows_json(table_id, [row])
+        if errors:
+            logger.error(f"Failed to log etl_run: {errors}")
     except Exception as e:
-        logger.error(f"Failed to rewrite etl_runs: {e}")
+        logger.error(f"Failed to log etl_run to BQ: {e}")
 
 
 def run_pipeline(backfill_days=7):
-    end_date = datetime.utcnow().date()
+    end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=backfill_days)
     
     logger.info(f"Starting pipeline for range {start_date} to {end_date}")
@@ -343,7 +339,7 @@ def run_pipeline(backfill_days=7):
         gcs_uri = upload_to_gcs(content, end_date, doc_id)
         
         # Load to BQ
-        row_count = transform_and_load_bq(gcs_uri, start_date, end_date)
+        row_count = transform_and_load_bq(gcs_uri, start_date, end_date, query_id, doc_id)
         
         log_etl_run(end_date, "SUCCESS", query_id, doc_id, row_count)
         logger.info("Pipeline Execution Completed Successfully")

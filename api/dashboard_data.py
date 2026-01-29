@@ -39,8 +39,7 @@ def get_dashboard_data():
             COUNT(DISTINCT order_id) as total_orders,
             ROUND(SUM(CAST(total_including_tax AS FLOAT64)), 2) as total_revenue,
             ROUND(AVG(CAST(total_including_tax AS FLOAT64)), 2) as avg_order_value,
-            COUNT(DISTINCT customer_id) as unique_customers,
-            SUM(total_items) as total_items
+            COUNT(DISTINCT customer_id) as unique_customers
           FROM `bonsai-outlet.sales.bc_order`
           WHERE DATE(order_created_date_time) >= '2025-01-01'
             -- Exclude: 0 (Incomplete), 3 (Partially Shipped), 5 (Cancelled), 6 (Declined)
@@ -49,35 +48,90 @@ def get_dashboard_data():
         ),
         amazon_weekly AS (
           SELECT 
-            -- Align report_start_date (usually Wed/Thu) to the following Monday, but split at year start
-            GREATEST(DATE_ADD(DATE_TRUNC(DATE(report_start_date), WEEK(MONDAY)), INTERVAL 7 DAY), DATE_TRUNC(DATE(report_start_date), YEAR)) as week_start,
-            EXTRACT(YEAR FROM DATE(report_start_date)) as year,
-            ROUND(SUM(COALESCE(sales_29_95, 0) + COALESCE(sales_59_92, 0) + COALESCE(sales_103_35, 0) + 
-                COALESCE(sales_119_1, 0) + COALESCE(sales_138_32, 0) + COALESCE(sales_164_55, 0)), 2) as total_sales,
-            SUM(COALESCE(units_sold_2, 0) + COALESCE(units_sold_4, 0) + COALESCE(units_sold_7, 0) + 
-                COALESCE(units_sold_8, 0) + COALESCE(units_sold_9, 0) + COALESCE(units_sold_11, 0)) as total_units,
-            ROUND(SUM(COALESCE(net_proceeds_total_6_64, 0) + COALESCE(net_proceeds_total_11_95, 0) + 
-                COALESCE(net_proceeds_total_17_68, 0) + COALESCE(net_proceeds_total_28_12, 0) +
-                COALESCE(net_proceeds_total_33_81, 0) + COALESCE(net_proceeds_total_49_74, 0)), 2) as net_proceeds
-          FROM `bonsai-outlet.amazon_weekly_economics.weekly_sku_economics`
+            -- Align daily data to the same Monday-start weeks as Bonsai
+            GREATEST(DATE_TRUNC(DATE(business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(business_date), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(business_date)) as year,
+            ROUND(SUM(CAST(gross_sales AS FLOAT64)), 2) as total_sales,
+            SUM(units) as total_units,
+            ROUND(SUM(CAST(net_proceeds AS FLOAT64)), 2) as net_proceeds
+          FROM `bonsai-outlet.amazon_econ.fact_sku_day_us`
+          WHERE business_date >= '2025-01-01'
           GROUP BY 1, 2
+        ),
+        amazon_traffic_weekly AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(report_date), WEEK(MONDAY)), DATE_TRUNC(DATE(report_date), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(report_date)) as year,
+            SUM(sessions) as sessions
+          FROM `bonsai-outlet.amazon_econ.fact_business_reports_us`
+          WHERE report_date >= '2025-01-01'
+          GROUP BY 1, 2
+        ),
+        ga4_traffic AS (
+          SELECT
+            GREATEST(DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)), DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), YEAR)) as week_start,
+            EXTRACT(YEAR FROM PARSE_DATE('%Y%m%d', event_date)) as year,
+            COUNTIF(event_name = 'session_start') as sessions,
+            COUNT(DISTINCT user_pseudo_id) as users
+          FROM `bonsai-outlet.analytics_250808038.events_*`
+          WHERE _TABLE_SUFFIX >= '20250101'
+          GROUP BY 1, 2
+        ),
+        wholesale_weekly AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(COALESCE(order_date, DATE(ingested_at))), WEEK(MONDAY)), DATE_TRUNC(DATE(COALESCE(order_date, DATE(ingested_at))), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(COALESCE(order_date, DATE(ingested_at)))) as year,
+            COUNT(DISTINCT order_id) as total_orders,
+            ROUND(SUM(CAST(grand_total AS FLOAT64)), 2) as total_revenue
+          FROM (
+            -- Deduplicate on the fly: take the max total and date for each order_id
+            SELECT order_id, MAX(order_date) as order_date, MAX(grand_total) as grand_total, MAX(ingested_at) as ingested_at
+            FROM `bonsai-outlet.wholesale.order_header`
+            WHERE grand_total > 0
+            GROUP BY order_id
+          )
+          WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2025-01-01'
+          GROUP BY 1, 2
+        ),
+        weeks AS (
+          SELECT week_start, year FROM bonsai_weekly
+          UNION DISTINCT
+          SELECT week_start, year FROM amazon_weekly
+          UNION DISTINCT
+          SELECT week_start, year FROM amazon_traffic_weekly
+          UNION DISTINCT
+          SELECT week_start, year FROM ga4_traffic
+          UNION DISTINCT
+          SELECT week_start, year FROM wholesale_weekly
         )
         SELECT 
-          FORMAT_DATE('%Y-%m-%d', b.week_start) as week_start,
-          b.year,
-          b.total_orders as bonsai_orders,
-          b.total_revenue as bonsai_revenue,
-          b.avg_order_value as bonsai_aov,
-          b.unique_customers as bonsai_customers,
+          FORMAT_DATE('%Y-%m-%d', w.week_start) as week_start,
+          w.year,
+          COALESCE(b.total_orders, 0) as bonsai_orders,
+          COALESCE(b.total_revenue, 0) as bonsai_revenue,
+          COALESCE(b.avg_order_value, 0) as bonsai_aov,
+          COALESCE(b.unique_customers, 0) as bonsai_customers,
+          COALESCE(g.sessions, 0) as bonsai_sessions,
+          COALESCE(g.users, 0) as bonsai_users,
+          ROUND(SAFE_DIVIDE(COALESCE(b.total_orders, 0), COALESCE(g.sessions, 0)) * 100, 2) as bonsai_cvr,
           COALESCE(a.total_units, 0) as amazon_units,
           COALESCE(a.total_sales, 0) as amazon_revenue,
           COALESCE(a.net_proceeds, 0) as amazon_net_proceeds,
+          COALESCE(t.sessions, 0) as amazon_sessions,
+          ROUND(SAFE_DIVIDE(COALESCE(a.total_units, 0), COALESCE(t.sessions, 0)) * 100, 2) as amazon_cvr,
           ROUND((COALESCE(a.net_proceeds, 0) / NULLIF(COALESCE(a.total_sales, 0), 0)) * 100, 2) as amazon_margin_pct,
-          ROUND(b.total_revenue + COALESCE(a.total_sales, 0), 2) as total_company_revenue,
-          ROUND(b.total_revenue + COALESCE(a.net_proceeds, 0), 2) as estimated_company_profit
-        FROM bonsai_weekly b
-        LEFT JOIN amazon_weekly a ON b.week_start = a.week_start AND b.year = a.year
-        ORDER BY b.week_start DESC
+          COALESCE(wh.total_orders, 0) as wholesale_orders,
+          COALESCE(wh.total_revenue, 0) as wholesale_revenue,
+          ROUND(SAFE_DIVIDE(COALESCE(CAST(wh.total_revenue AS FLOAT64), 0), NULLIF(COALESCE(wh.total_orders, 0), 0)), 2) as wholesale_aov,
+          ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.total_sales, 0) + COALESCE(wh.total_revenue, 0), 2) as total_company_revenue,
+          ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.net_proceeds, 0) + COALESCE(wh.total_revenue, 0), 2) as estimated_company_profit
+        FROM weeks w
+        LEFT JOIN bonsai_weekly b ON w.week_start = b.week_start AND w.year = b.year
+        LEFT JOIN amazon_weekly a ON w.week_start = a.week_start AND w.year = a.year
+        LEFT JOIN amazon_traffic_weekly t ON w.week_start = t.week_start AND w.year = t.year
+        LEFT JOIN ga4_traffic g ON w.week_start = g.week_start AND w.year = g.year
+        LEFT JOIN wholesale_weekly wh ON w.week_start = wh.week_start AND w.year = wh.year
+        ORDER BY w.week_start DESC
         LIMIT 100
         """
         
