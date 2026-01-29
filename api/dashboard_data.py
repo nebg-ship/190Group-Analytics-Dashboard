@@ -128,7 +128,7 @@ def get_dashboard_data():
             COUNT(DISTINCT order_id) as total_orders,
             ROUND(SUM(CAST(grand_total AS FLOAT64)), 2) as total_revenue
           FROM `bonsai-outlet.wholesale.order_header`
-          WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2025-01-01'
+          WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2026-01-01'
             AND grand_total > 0
           GROUP BY 1
           ORDER BY 3 DESC
@@ -219,7 +219,7 @@ def get_dashboard_data():
                 SUM(CAST(grand_total AS FLOAT64)) as total_revenue,
                 MAX(DATE(COALESCE(order_date, DATE(ingested_at)))) as latest_order
             FROM deduplicated_orders
-            WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2025-01-01'
+            WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2026-01-01'
             GROUP BY 1
         )
         SELECT
