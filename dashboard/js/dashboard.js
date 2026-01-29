@@ -138,6 +138,7 @@ function updateKPIs(data, prevPeriodData) {
 
     // Handle Wholesale Customers Section visibility
     const wholesaleSection = document.getElementById('wholesaleCustomersSection');
+    const customerTypeTrendCard = document.getElementById('customerTypeTrendCard');
     const channelMixCard = document.getElementById('channelMixCard');
 
     if (currentChannelFilter === 'wholesale') {
@@ -145,6 +146,12 @@ function updateKPIs(data, prevPeriodData) {
         renderWholesaleCustomers(wholesaleCustomers);
     } else {
         wholesaleSection.classList.add('hidden');
+    }
+
+    if (currentChannelFilter === 'bonsai') {
+        customerTypeTrendCard.classList.remove('hidden');
+    } else {
+        customerTypeTrendCard.classList.add('hidden');
     }
 
     if (currentChannelFilter === 'all') {
@@ -345,13 +352,33 @@ function updateKPIs(data, prevPeriodData) {
         document.getElementById('customers').textContent = 'N/A';
         updateChangeElement('customersChange', 0);
         document.getElementById('customersPrev').textContent = '';
+
+        document.getElementById('newCustomers').textContent = 'N/A';
+        updateChangeElement('newCustomersChange', 0);
+        document.getElementById('newCustomersPrev').textContent = '';
+
+        document.getElementById('returningCustomers').textContent = 'N/A';
+        updateChangeElement('returningCustomersChange', 0);
+        document.getElementById('returningCustomersPrev').textContent = '';
     } else {
-        totalBonsaiCustomers = data.reduce((sum, d) => sum + (d.bonsai_customers || 0), 0);
-        prevTotalBonsaiCustomers = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_customers || 0), 0);
+        const totalBonsaiCustomers = data.reduce((sum, d) => sum + (d.bonsai_customers || 0), 0);
+        const prevTotalBonsaiCustomers = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_customers || 0), 0);
         document.getElementById('customers').textContent = formatNumber(totalBonsaiCustomers);
         const custChange = totalBonsaiCustomers - prevTotalBonsaiCustomers;
         updateChangeElement('customersChange', custChange, 'vs LY');
         document.getElementById('customersPrev').textContent = `LY: ${formatNumber(prevTotalBonsaiCustomers)}`;
+
+        const totalNew = data.reduce((sum, d) => sum + (d.bonsai_new_customers || 0), 0);
+        const prevNew = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_new_customers || 0), 0);
+        document.getElementById('newCustomers').textContent = formatNumber(totalNew);
+        updateChangeElement('newCustomersChange', totalNew - prevNew, 'vs LY');
+        document.getElementById('newCustomersPrev').textContent = `LY: ${formatNumber(prevNew)}`;
+
+        const totalReturning = data.reduce((sum, d) => sum + (d.bonsai_returning_customers || 0), 0);
+        const prevReturning = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_returning_customers || 0), 0);
+        document.getElementById('returningCustomers').textContent = formatNumber(totalReturning);
+        updateChangeElement('returningCustomersChange', totalReturning - prevReturning, 'vs LY');
+        document.getElementById('returningCustomersPrev').textContent = `LY: ${formatNumber(prevReturning)}`;
     }
 
     // Bonsai Sessions (from GA4)
@@ -414,6 +441,12 @@ function updateCharts(data) {
     runUpdate('WoW Trend', updateWowTrendChart, reversedData);
     runUpdate('YoY Trend', updateYoyTrendChart, reversedData);
     runUpdate('YoY Comparison', updateYoyComparisonChart, data);
+
+    if (currentChannelFilter === 'bonsai') {
+        runUpdate('Bonsai Customer Breakdown', updateCustomerTypeTrendChart, reversedData);
+    } else {
+        if (charts.customerTypeTrend) charts.customerTypeTrend.destroy();
+    }
 }
 
 // Revenue Trend Chart
@@ -694,6 +727,42 @@ function updateYoyComparisonChart(data) {
             ]
         },
         options: getChartOptions('Revenue ($)')
+    });
+}
+
+// New vs Returning Customer Trend (Bonsai Only)
+function updateCustomerTypeTrendChart(data) {
+    const ctx = document.getElementById('customerTypeTrendChart');
+
+    if (charts.customerTypeTrend) {
+        charts.customerTypeTrend.destroy();
+    }
+
+    charts.customerTypeTrend = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: data.map(d => formatDate(d.week_start)),
+            datasets: [
+                {
+                    label: 'New Customers',
+                    data: data.map(d => d.bonsai_new_customers || 0),
+                    backgroundColor: '#10b981'
+                },
+                {
+                    label: 'Returning Customers',
+                    data: data.map(d => d.bonsai_returning_customers || 0),
+                    backgroundColor: '#3b82f6'
+                }
+            ]
+        },
+        options: {
+            ...getChartOptions('Customers'),
+            scales: {
+                ...getChartOptions('Customers').scales,
+                x: { ...getChartOptions('Customers').scales.x, stacked: true },
+                y: { ...getChartOptions('Customers').scales.y, stacked: true }
+            }
+        }
     });
 }
 

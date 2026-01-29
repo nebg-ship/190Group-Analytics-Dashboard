@@ -188,6 +188,30 @@
             </div>
 
             <div class="kpi-card" data-channel="bonsai">
+                <div class="kpi-icon">✨</div>
+                <div class="kpi-content">
+                    <h3>New Customers</h3>
+                    <p class="kpi-value" id="newCustomers">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="newCustomersChange">-</p>
+                        <p class="kpi-prev" id="newCustomersPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="bonsai">
+                <div class="kpi-icon">🔄</div>
+                <div class="kpi-content">
+                    <h3>Returning</h3>
+                    <p class="kpi-value" id="returningCustomers">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="returningCustomersChange">-</p>
+                        <p class="kpi-prev" id="returningCustomersPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="bonsai">
                 <div class="kpi-icon">🌐</div>
                 <div class="kpi-content">
                     <h3>Bonsai Sessions</h3>
@@ -237,6 +261,11 @@
             <div class="chart-card large">
                 <h3>Year-over-Year Comparison</h3>
                 <canvas id="yoyComparisonChart"></canvas>
+            </div>
+
+            <div class="chart-card large" id="customerTypeTrendCard">
+                <h3>New vs Returning Customers (Bonsai)</h3>
+                <canvas id="customerTypeTrendChart"></canvas>
             </div>
         </section>
 

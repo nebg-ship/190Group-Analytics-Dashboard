@@ -31,7 +31,27 @@ def get_dashboard_data():
         
         query = """
         -- CEO Dashboard: Combined Amazon + Bonsai Outlet Metrics
-        WITH bonsai_weekly AS (
+        WITH bonsai_customers AS (
+          SELECT
+            customer_id,
+            MIN(order_created_date_time) as first_order_date
+          FROM `bonsai-outlet.sales.bc_order`
+          WHERE order_status_id NOT IN (0, 3, 5, 6)
+          GROUP BY 1
+        ),
+        bonsai_weekly_types AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(o.order_created_date_time)) as year,
+            COUNT(DISTINCT IF(DATE(o.order_created_date_time) = DATE(c.first_order_date), o.customer_id, NULL)) as new_customers,
+            COUNT(DISTINCT IF(DATE(o.order_created_date_time) > DATE(c.first_order_date), o.customer_id, NULL)) as returning_customers
+          FROM `bonsai-outlet.sales.bc_order` o
+          JOIN bonsai_customers c ON o.customer_id = c.customer_id
+          WHERE DATE(o.order_created_date_time) >= '2025-01-01'
+            AND o.order_status_id NOT IN (0, 3, 5, 6)
+          GROUP BY 1, 2
+        ),
+        bonsai_weekly AS (
           SELECT
             -- Split week at year boundary for accurate YTD sums
             GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), YEAR)) as week_start,
@@ -134,6 +154,8 @@ def get_dashboard_data():
           COALESCE(b.total_revenue, 0) as bonsai_revenue,
           COALESCE(b.avg_order_value, 0) as bonsai_aov,
           COALESCE(b.unique_customers, 0) as bonsai_customers,
+          COALESCE(bt.new_customers, 0) as bonsai_new_customers,
+          COALESCE(bt.returning_customers, 0) as bonsai_returning_customers,
           COALESCE(g.sessions, 0) as bonsai_sessions,
           COALESCE(g.users, 0) as bonsai_users,
           ROUND(SAFE_DIVIDE(COALESCE(b.total_orders, 0), COALESCE(g.sessions, 0)) * 100, 2) as bonsai_cvr,
@@ -151,6 +173,7 @@ def get_dashboard_data():
           ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.net_proceeds, 0) + COALESCE(wh.total_revenue, 0), 2) as estimated_company_profit
         FROM weeks w
         LEFT JOIN bonsai_weekly b ON w.week_start = b.week_start AND w.year = b.year
+        LEFT JOIN bonsai_weekly_types bt ON w.week_start = bt.week_start AND w.year = bt.year
         LEFT JOIN amazon_weekly a ON w.week_start = a.week_start AND w.year = a.year
         LEFT JOIN amazon_traffic_weekly t ON w.week_start = t.week_start AND w.year = t.year
         LEFT JOIN ga4_traffic g ON w.week_start = g.week_start AND w.year = g.year
