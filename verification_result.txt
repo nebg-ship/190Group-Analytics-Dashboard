@@ -1,0 +1,8 @@
+SUCCESS: 'wholesale_customers' field found with 8 records.
+Found target customer:
+{
+  "company_name": "Stone Lantern",
+  "customer_name": "Wayne Schoech",
+  "total_orders": 1,
+  "total_revenue": 392.0
+}

@@ -20,9 +20,8 @@ PROCESSED_DIR = INVOICE_DIR / 'processed'
 def get_bigquery_client():
     return bigquery.Client(project=PROJECT_ID)
 
-def parse_invoice(file_path: Path) -> dict:
-    """Parse a Markdown invoice file and extract order data."""
-    content = file_path.read_text(encoding='utf-8')
+def parse_invoice_text(content: str) -> dict:
+    """Parse a Markdown invoice block and extract order data."""
     
     # 1. Extract Order ID
     order_id = None
@@ -43,12 +42,13 @@ def parse_invoice(file_path: Path) -> dict:
                 pass
 
     # 3. Extract Customer Name (Look for Billing Details block)
-    customer_name = ""
+    header_customer = ""
+    header_company = ""
     customer_email = ""
     customer_phone = ""
     billing_address = ""
     
-    bill_block_match = re.search(r'##+ Billing Details\s*\n(.*?)(?=\n##+|\n---|\n\*|\n\*\*Order)', content, re.DOTALL | re.IGNORECASE)
+    bill_block_match = re.search(r'##+ Billing Details\s*\n(.*?)(?=\n##+|\n---|\n\*\*Order)', content, re.DOTALL | re.IGNORECASE)
     if bill_block_match:
         block = bill_block_match.group(1).strip()
         # Look for labels
@@ -61,26 +61,26 @@ def parse_invoice(file_path: Path) -> dict:
         company_name = company_match.group(1).strip() if company_match else ""
         
         if company_name:
-            customer_name = company_name
-            if contact_name:
-                customer_name = f"{company_name} ({contact_name})"
+            header_company = company_name
+            header_customer = contact_name if contact_name else company_name
         elif contact_name:
-            customer_name = contact_name
+            header_customer = contact_name
+            header_company = ""
         else:
             # Fallback for multi-line format without labels:
-            # First line is usually **Name**, second line is Company
+            # First line is usually Name, second line is Company
             lines = [l.strip() for l in block.split('\n') if l.strip()]
             if lines:
                 name_match_fall = re.search(r'\*\*(.+?)\*\*', lines[0])
-                if name_match_fall:
-                    contact_name = name_match_fall.group(1).strip()
-                    if len(lines) > 1 and not any(k in lines[1] for k in ['**', '*', 'Email:', 'Phone:']):
-                        company_name = lines[1].strip()
-                        customer_name = f"{company_name} ({contact_name})"
-                    else:
-                        customer_name = contact_name
+                header_customer = name_match_fall.group(1).strip() if name_match_fall else lines[0].strip().strip('*').strip()
+                
+                if len(lines) > 1 and not any(k in lines[1] for k in ['**', '*', 'Email:', 'Phone:']):
+                    header_company = lines[1].strip()
                 else:
-                    customer_name = lines[0].strip().strip('*').strip()
+                    header_company = ""
+            else:
+                header_customer = ""
+                header_company = ""
             
         if email_match: customer_email = email_match.group(1).strip()
         if phone_match: customer_phone = phone_match.group(1).strip()
@@ -130,7 +130,8 @@ def parse_invoice(file_path: Path) -> dict:
     header = {
         'order_id': order_id,
         'order_date': order_date,
-        'customer_name': customer_name,
+        'customer_name': header_customer,
+        'company_name': header_company,
         'customer_email': customer_email,
         'customer_phone': customer_phone,
         'billing_address': billing_address,
@@ -170,7 +171,7 @@ def load_to_bigquery(data: dict):
     return True
 
 def process_invoices():
-    """Process all pending invoice files."""
+    """Process all pending invoice files, handling multi-invoice files."""
     PROCESSED_DIR.mkdir(exist_ok=True)
     
     processed_count = 0
@@ -179,31 +180,55 @@ def process_invoices():
             continue
             
         print(f"Processing: {file_path.name}")
+        content = file_path.read_text(encoding='utf-8')
         
-        try:
-            data = parse_invoice(file_path)
-            
-            if not data['header']['order_id']:
-                print(f"  Skipping - could not extract order ID")
-                continue
-            
-            print(f"  Order ID: {data['header']['order_id']}")
-            print(f"  Items: {len(data['line_items'])}")
-            print(f"  Total: ${data['header']['grand_total']:.2f}")
-            
-            if load_to_bigquery(data):
-                # Move to processed folder
-                dest = PROCESSED_DIR / file_path.name
-                shutil.move(str(file_path), str(dest))
-                print(f"  Loaded to BigQuery and moved to processed/")
-                processed_count += 1
+        # Split content into blocks based on order markers or page markers
+        # We look for "order #" or "Order: #" and split cautiously.
+        # Page markers "## Page" are also good indicators for bulk files.
+        blocks = []
+        if '## Page' in content:
+            blocks = re.split(r'\n## Page \d+', content)
+        else:
+            # Check for multiple order numbers
+            order_count = len(re.findall(r'(?:order #|Order: #)\d+', content, re.IGNORECASE))
+            if order_count > 1:
+                # Split by the order header pattern
+                blocks = re.split(r'\n(?=###?.*?order #\d+)', content, flags=re.IGNORECASE)
             else:
-                print(f"  Failed to load to BigQuery")
+                blocks = [content]
+
+        file_success = True
+        for block in blocks:
+            if not block.strip() or 'order #' not in block.lower():
+                continue
                 
-        except Exception as e:
-            print(f"  Error: {e}")
+            try:
+                data = parse_invoice_text(block)
+                if not data['header']['order_id']:
+                    continue
+                
+                print(f"  Order ID: {data['header']['order_id']}")
+                print(f"  Items: {len(data['line_items'])}")
+                print(f"  Total: ${data['header']['grand_total']:.2f}")
+                
+                if load_to_bigquery(data):
+                    processed_count += 1
+                else:
+                    file_success = False
+                    print(f"  Failed to load Order {data['header']['order_id']}")
+            except Exception as e:
+                file_success = False
+                print(f"  Error processing block: {e}")
+
+        if file_success and file_path.exists():
+            # Move to processed folder if all orders in file loaded
+            dest = PROCESSED_DIR / file_path.name
+            if dest.exists(): dest.unlink() # Avoid error if replacement needed
+            shutil.move(str(file_path), str(dest))
+            print(f"  Moved {file_path.name} to processed/")
     
-    print(f"\nProcessed {processed_count} invoice(s)")
+    print(f"\nProcessed {processed_count} order(s)")
 
 if __name__ == '__main__':
     process_invoices()
+

@@ -30,9 +30,9 @@
                 <div class="filter-group">
                     <label>Time Period:</label>
                     <div class="time-filter">
-                        <button class="filter-btn active" data-weeks="4">Last 4 Weeks</button>
-                        <button class="filter-btn" data-weeks="12">Last 12 Weeks</button>
-                        <button class="filter-btn" data-weeks="ytd">YTD</button>
+                        <button class="filter-btn" data-period="month">Current Month</button>
+                        <button class="filter-btn" data-period="quarter">This Quarter</button>
+                        <button class="filter-btn active" data-period="ytd">YTD</button>
                     </div>
                 </div>
                 <div class="last-updated" id="lastUpdated">Loading...</div>
@@ -65,17 +65,7 @@
                 </div>
             </div>
 
-            <div class="kpi-card" data-channel="all">
-                <div class="kpi-icon">📈</div>
-                <div class="kpi-content">
-                    <h3>WoW Growth</h3>
-                    <p class="kpi-value" id="wowGrowth">0%</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="wowChange">-</p>
-                        <p class="kpi-prev" id="wowPrev">-</p>
-                    </div>
-                </div>
-            </div>
+
 
             <div class="kpi-card" data-channel="all">
                 <div class="kpi-icon">📅</div>
@@ -229,19 +219,53 @@
                 <canvas id="revenueTrendChart"></canvas>
             </div>
 
-            <div class="chart-card">
+            <div class="chart-card" id="channelMixCard">
                 <h3>Channel Mix</h3>
                 <canvas id="channelMixChart"></canvas>
             </div>
 
             <div class="chart-card">
-                <h3>Year-over-Year Growth</h3>
-                <canvas id="wowGrowthChart"></canvas>
+                <h3>WoW Revenue Growth (%)</h3>
+                <canvas id="wowTrendChart"></canvas>
+            </div>
+
+            <div class="chart-card">
+                <h3>YoY Revenue Growth (%)</h3>
+                <canvas id="yoyTrendChart"></canvas>
             </div>
 
             <div class="chart-card large">
                 <h3>Year-over-Year Comparison</h3>
                 <canvas id="yoyComparisonChart"></canvas>
+            </div>
+        </section>
+
+        <!-- Wholesale Top Customers (Hidden by default) -->
+        <section id="wholesaleCustomersSection" class="kpi-section hidden"
+            style="display: block; width: 100%; margin-top: 2rem;">
+            <div class="card"
+                style="width: 100%; padding: 1.5rem; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+                <h3 style="color: var(--text-muted); font-size: 0.875rem; font-weight: 500; margin-bottom: 1rem;">Top
+                    Wholesale Customers (2025 YTD)</h3>
+                <div style="overflow-x: auto;">
+                    <table style="width: 100%; text-align: left; border-collapse: collapse;">
+                        <thead
+                            style="background: rgba(55, 65, 81, 0.5); text-transform: uppercase; font-size: 0.75rem; color: var(--text-muted);">
+                            <tr>
+                                <th style="padding: 0.75rem 1.5rem; border-top-left-radius: 0.5rem;">Company Name</th>
+                                <th style="padding: 0.75rem 1.5rem;">Contact Name</th>
+                                <th style="padding: 0.75rem 1.5rem;">Total Orders</th>
+                                <th
+                                    style="padding: 0.75rem 1.5rem; border-top-right-radius: 0.5rem; text-align: right;">
+                                    Total Revenue</th>
+                            </tr>
+                        </thead>
+                        <tbody id="wholesaleCustomersTableBody"
+                            style="font-size: 0.875rem; color: var(--text-secondary);">
+                            <!-- Data will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </section>
     </div>

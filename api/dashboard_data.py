@@ -77,6 +77,15 @@ def get_dashboard_data():
           WHERE _TABLE_SUFFIX >= '20250101'
           GROUP BY 1, 2
         ),
+        amazon_orders_weekly AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(posted_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(posted_date_time), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(posted_date_time)) as year,
+            COUNT(DISTINCT order_id) as total_orders
+          FROM `bonsai-outlet.amazon_econ.fact_settlements_us`
+          WHERE DATE(posted_date_time) >= '2025-01-01'
+          GROUP BY 1, 2
+        ),
         wholesale_weekly AS (
           SELECT
             GREATEST(DATE_TRUNC(DATE(COALESCE(order_date, DATE(ingested_at))), WEEK(MONDAY)), DATE_TRUNC(DATE(COALESCE(order_date, DATE(ingested_at))), YEAR)) as week_start,
@@ -93,6 +102,18 @@ def get_dashboard_data():
           WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2025-01-01'
           GROUP BY 1, 2
         ),
+        wholesale_customers AS (
+          SELECT
+            COALESCE(NULLIF(company_name, ''), customer_name) as display_company,
+            COUNT(DISTINCT order_id) as total_orders,
+            ROUND(SUM(CAST(grand_total AS FLOAT64)), 2) as total_revenue
+          FROM `bonsai-outlet.wholesale.order_header`
+          WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2025-01-01'
+            AND grand_total > 0
+          GROUP BY 1
+          ORDER BY 3 DESC
+          LIMIT 20
+        ),
         weeks AS (
           SELECT week_start, year FROM bonsai_weekly
           UNION DISTINCT
@@ -101,6 +122,8 @@ def get_dashboard_data():
           SELECT week_start, year FROM amazon_traffic_weekly
           UNION DISTINCT
           SELECT week_start, year FROM ga4_traffic
+          UNION DISTINCT
+          SELECT week_start, year FROM amazon_orders_weekly
           UNION DISTINCT
           SELECT week_start, year FROM wholesale_weekly
         )
@@ -116,6 +139,7 @@ def get_dashboard_data():
           ROUND(SAFE_DIVIDE(COALESCE(b.total_orders, 0), COALESCE(g.sessions, 0)) * 100, 2) as bonsai_cvr,
           COALESCE(a.total_units, 0) as amazon_units,
           COALESCE(a.total_sales, 0) as amazon_revenue,
+          COALESCE(ao.total_orders, 0) as amazon_orders,
           COALESCE(a.net_proceeds, 0) as amazon_net_proceeds,
           COALESCE(t.sessions, 0) as amazon_sessions,
           ROUND(SAFE_DIVIDE(COALESCE(a.total_units, 0), COALESCE(t.sessions, 0)) * 100, 2) as amazon_cvr,
@@ -130,22 +154,77 @@ def get_dashboard_data():
         LEFT JOIN amazon_weekly a ON w.week_start = a.week_start AND w.year = a.year
         LEFT JOIN amazon_traffic_weekly t ON w.week_start = t.week_start AND w.year = t.year
         LEFT JOIN ga4_traffic g ON w.week_start = g.week_start AND w.year = g.year
+        LEFT JOIN amazon_orders_weekly ao ON w.week_start = ao.week_start AND w.year = ao.year
         LEFT JOIN wholesale_weekly wh ON w.week_start = wh.week_start AND w.year = wh.year
         ORDER BY w.week_start DESC
         LIMIT 100
         """
         
         query_job = client.query(query)
+        # BigQuery does not support multiple result sets in one query execution directly via the standard client.query() returning an iterator for each.
+        # However, we can execute the CTEs.
+        # Actually, best practice to get two different datasets is two queries or array agg.
+        
+        # Let's adjust the query to returning the main data, and then strict the customers separately or hack it.
+        # Simpler approach: Run a separate query for top wholesale customers or use JSON_AGG.
+        
+        # Re-writing the main query execution to include a second query for wholesale customers
+        # or separate them. Given the structure effectively, I will separate them to ensure clarity.
+        
+        # Execute Main Query
         results = query_job.result()
         
-        # Convert to list of dicts
+        # Fetch Top Wholesale Customers separately to keep it clean
+        customer_query = """
+        WITH deduplicated_orders AS (
+            SELECT 
+                order_id, 
+                MAX(company_name) as company_name, 
+                MAX(customer_name) as customer_name, 
+                MAX(order_date) as order_date, 
+                MAX(grand_total) as grand_total,
+                MAX(ingested_at) as ingested_at
+            FROM `bonsai-outlet.wholesale.order_header`
+            WHERE grand_total > 0
+            GROUP BY order_id
+        ),
+        consolidated_customers AS (
+            SELECT
+                COALESCE(NULLIF(company_name, ''), customer_name) as display_company,
+                STRING_AGG(DISTINCT customer_name, ', ') as contact_names,
+                COUNT(DISTINCT order_id) as total_orders,
+                SUM(CAST(grand_total AS FLOAT64)) as total_revenue,
+                MAX(DATE(COALESCE(order_date, DATE(ingested_at)))) as latest_order
+            FROM deduplicated_orders
+            WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2025-01-01'
+            GROUP BY 1
+        )
+        SELECT
+            display_company as company_name,
+            contact_names as customer_name,
+            total_orders,
+            ROUND(total_revenue, 2) as total_revenue
+        FROM consolidated_customers
+        ORDER BY total_revenue DESC
+        LIMIT 20
+        """
+        customer_job = client.query(customer_query)
+        customer_results = customer_job.result()
+        
+        # Convert to list of dicts for main data
+
         data = []
         for row in results:
             data.append(dict(row))
+            
+        wholesale_customers = []
+        for row in customer_results:
+            wholesale_customers.append(dict(row))
         
         return jsonify({
             'success': True,
             'data': data,
+            'wholesale_customers': wholesale_customers,
             'timestamp': datetime.now().isoformat()
         })
         
