@@ -88,6 +88,17 @@ function updateDashboard() {
             const dDate = new Date(d.week_start + 'T00:00:00Z');
             return Number(d.year) == currentYear && dDate.getUTCMonth() === currentMonth;
         });
+    } else if (currentWeeksFilter === 'last-month') {
+        let targetMonth = currentMonth - 1;
+        let targetYear = currentYear;
+        if (targetMonth < 0) {
+            targetMonth = 11;
+            targetYear = currentYear - 1;
+        }
+        filteredData = dashboardData.filter(d => {
+            const dDate = new Date(d.week_start + 'T00:00:00Z');
+            return Number(d.year) == targetYear && dDate.getUTCMonth() === targetMonth;
+        });
     } else if (currentWeeksFilter === 'quarter') {
         const currentQuarter = Math.floor(currentMonth / 3);
         filteredData = dashboardData.filter(d => {

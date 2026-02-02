@@ -5,3 +5,6 @@ python-dotenv
 boto3
 requests-aws4auth
 openpyxl
+
+flask
+flask-cors
