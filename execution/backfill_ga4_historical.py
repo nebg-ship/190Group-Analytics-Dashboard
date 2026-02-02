@@ -15,11 +15,11 @@ from google.cloud import bigquery
 import pandas as pd
 
 # Configuration
-PROPERTY_ID = "250808038"
-PROJECT_ID = "bonsai-outlet"
-DATASET_ID = "analytics_250808038"
-TABLE_ID = "ga4_historical_summary"
-SERVICE_ACCOUNT_FILE = "service-account.json"
+PROPERTY_ID = os.getenv("GA4_PROPERTY_ID")
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
+DATASET_ID = os.getenv("GA4_DATASET")
+TABLE_ID = os.getenv("GA4_HISTORICAL_TABLE", "ga4_historical_summary")
+SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service-account.json")
 
 def get_client():
     return BetaAnalyticsDataClient.from_service_account_json(SERVICE_ACCOUNT_FILE)

@@ -19,7 +19,10 @@ CORS(app)
 PROJECT_ROOT = Path(__file__).parent.parent
 
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT')
-SALES_DATASET = 'sales'
+GA4_DATASET = os.getenv('GA4_DATASET')
+SALES_DATASET = os.getenv('SALES_DATASET', 'sales')
+AMAZON_ECON_DATASET = os.getenv('AMAZON_ECON_DATASET', 'amazon_econ')
+WHOLESALE_DATASET = os.getenv('WHOLESALE_DATASET', 'wholesale')
 
 # Hardwired BigCommerce line-item table + columns (per user confirmation)
 LINE_ITEMS_TABLE = 'bc_order_product'
@@ -112,13 +115,13 @@ def get_dashboard_data():
     try:
         client = get_bigquery_client()
         
-        query = """
+        query = f"""
         -- CEO Dashboard: Combined Amazon + Bonsai Outlet Metrics
         WITH bonsai_customers AS (
           SELECT
             customer_id,
             MIN(order_created_date_time) as first_order_date
-          FROM `bonsai-outlet.sales.bc_order`
+          FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
           WHERE order_status_id NOT IN (0, 3, 5, 6)
           GROUP BY 1
         ),
@@ -128,7 +131,7 @@ def get_dashboard_data():
             EXTRACT(YEAR FROM DATE(o.order_created_date_time)) as year,
             COUNT(DISTINCT IF(DATE(o.order_created_date_time) = DATE(c.first_order_date), o.customer_id, NULL)) as new_customers,
             COUNT(DISTINCT IF(DATE(o.order_created_date_time) > DATE(c.first_order_date), o.customer_id, NULL)) as returning_customers
-          FROM `bonsai-outlet.sales.bc_order` o
+          FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order` o
           JOIN bonsai_customers c ON o.customer_id = c.customer_id
           WHERE DATE(o.order_created_date_time) >= '2025-01-01'
             AND o.order_status_id NOT IN (0, 3, 5, 6)
@@ -143,7 +146,7 @@ def get_dashboard_data():
             ROUND(SUM(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as total_revenue,
             ROUND(AVG(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as avg_order_value,
             COUNT(DISTINCT customer_id) as unique_customers
-          FROM `bonsai-outlet.sales.bc_order`
+          FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
           WHERE DATE(order_created_date_time) >= '2025-01-01'
             -- Exclude: 0 (Incomplete), 3 (Partially Shipped), 5 (Cancelled), 6 (Declined)
             AND order_status_id NOT IN (0, 3, 5, 6)
@@ -157,7 +160,7 @@ def get_dashboard_data():
             ROUND(SUM(CAST(gross_sales AS FLOAT64)), 2) as total_sales,
             SUM(units) as total_units,
             ROUND(SUM(CAST(net_proceeds AS FLOAT64)), 2) as net_proceeds
-          FROM `bonsai-outlet.amazon_econ.fact_sku_day_us`
+          FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_sku_day_us`
           WHERE business_date >= '2025-01-01'
           GROUP BY 1, 2
         ),
@@ -166,7 +169,7 @@ def get_dashboard_data():
             GREATEST(DATE_TRUNC(DATE(report_date), WEEK(MONDAY)), DATE_TRUNC(DATE(report_date), YEAR)) as week_start,
             EXTRACT(YEAR FROM DATE(report_date)) as year,
             SUM(sessions) as sessions
-          FROM `bonsai-outlet.amazon_econ.fact_business_reports_us`
+          FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_business_reports_us`
           WHERE report_date >= '2025-01-01'
           GROUP BY 1, 2
         ),
@@ -183,7 +186,7 @@ def get_dashboard_data():
               EXTRACT(YEAR FROM PARSE_DATE('%Y%m%d', event_date)) as year,
               COUNTIF(event_name = 'session_start') as sessions,
               COUNT(DISTINCT user_pseudo_id) as users
-            FROM `bonsai-outlet.analytics_250808038.events_*`
+            FROM `{PROJECT_ID}.{GA4_DATASET}.events_*`
             WHERE _TABLE_SUFFIX >= '20250430'
             GROUP BY 1, 2
 
@@ -196,7 +199,7 @@ def get_dashboard_data():
               EXTRACT(YEAR FROM hb.`date`) as year,
               SUM(hb.sessions) as sessions,
               SUM(hb.users) as users
-            FROM `bonsai-outlet.analytics_250808038.ga4_historical_summary` AS hb
+            FROM `{PROJECT_ID}.{GA4_DATASET}.ga4_historical_summary` AS hb
             GROUP BY 1, 2
           )
           GROUP BY 1, 2
@@ -206,7 +209,7 @@ def get_dashboard_data():
             GREATEST(DATE_TRUNC(DATE(posted_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(posted_date_time), YEAR)) as week_start,
             EXTRACT(YEAR FROM DATE(posted_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders
-          FROM `bonsai-outlet.amazon_econ.fact_settlements_us`
+          FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_settlements_us`
           WHERE DATE(posted_date_time) >= '2025-01-01'
           GROUP BY 1, 2
         ),
@@ -219,7 +222,7 @@ def get_dashboard_data():
           FROM (
             -- Deduplicate on the fly: take the max total and date for each order_id
             SELECT order_id, MAX(order_date) as order_date, MAX(grand_total) as grand_total, MAX(ingested_at) as ingested_at
-            FROM `bonsai-outlet.wholesale.order_header`
+            FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.order_header`
             WHERE grand_total > 0
             GROUP BY order_id
           )
@@ -231,7 +234,7 @@ def get_dashboard_data():
             COALESCE(NULLIF(company_name, ''), customer_name) as display_company,
             COUNT(DISTINCT order_id) as total_orders,
             ROUND(SUM(CAST(grand_total AS FLOAT64)), 2) as total_revenue
-          FROM `bonsai-outlet.wholesale.order_header`
+          FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.order_header`
           WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2026-01-01'
             AND grand_total > 0
           GROUP BY 1
@@ -302,7 +305,7 @@ def get_dashboard_data():
         results = query_job.result()
         
         # Fetch Top Wholesale Customers separately to keep it clean
-        customer_query = """
+        customer_query = f"""
         WITH deduplicated_orders AS (
             SELECT 
                 order_id, 
@@ -311,7 +314,7 @@ def get_dashboard_data():
                 MAX(order_date) as order_date, 
                 MAX(grand_total) as grand_total,
                 MAX(ingested_at) as ingested_at
-            FROM `bonsai-outlet.wholesale.order_header`
+            FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.order_header`
             WHERE grand_total > 0
             GROUP BY order_id
         ),

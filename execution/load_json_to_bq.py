@@ -2,9 +2,9 @@ import os
 import json
 from google.cloud import bigquery
 
-PROJECT_ID = 'bonsai-outlet'
-DATASET_ID = 'amazon_weekly_economics'
-TABLE_ID = 'weekly_sku_economics'
+PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT')
+DATASET_ID = os.getenv('AMAZON_ECON_DATASET')
+TABLE_ID = os.getenv('AMAZON_WEEKLY_ECON_TABLE', 'weekly_sku_economics')
 JSONL_FILE = 'temp_ingest/weekly_data.jsonl'
 
 def main():
