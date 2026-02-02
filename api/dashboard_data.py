@@ -88,13 +88,34 @@ def get_dashboard_data():
           GROUP BY 1, 2
         ),
         ga4_traffic AS (
-          SELECT
-            GREATEST(DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)), DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), YEAR)) as week_start,
-            EXTRACT(YEAR FROM PARSE_DATE('%Y%m%d', event_date)) as year,
-            COUNTIF(event_name = 'session_start') as sessions,
-            COUNT(DISTINCT user_pseudo_id) as users
-          FROM `bonsai-outlet.analytics_250808038.events_*`
-          WHERE _TABLE_SUFFIX >= '20250101'
+          SELECT 
+            week_start, 
+            year, 
+            SUM(sessions) as sessions, 
+            SUM(users) as users
+          FROM (
+            -- Live BigQuery Export Data (where available)
+            SELECT
+              GREATEST(DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)), DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), YEAR)) as week_start,
+              EXTRACT(YEAR FROM PARSE_DATE('%Y%m%d', event_date)) as year,
+              COUNTIF(event_name = 'session_start') as sessions,
+              COUNT(DISTINCT user_pseudo_id) as users
+            FROM `bonsai-outlet.analytics_250808038.events_*`
+            WHERE _TABLE_SUFFIX >= '20250430'
+            GROUP BY 1, 2
+
+            UNION ALL
+
+            -- Backfilled Historical Data (Full year 2025)
+            -- We only use backfill data for dates where the BQ export is missing or incomplete
+            SELECT
+              GREATEST(DATE_TRUNC(hb.`date`, WEEK(MONDAY)), DATE_TRUNC(hb.`date`, YEAR)) as week_start,
+              EXTRACT(YEAR FROM hb.`date`) as year,
+              SUM(hb.sessions) as sessions,
+              SUM(hb.users) as users
+            FROM `bonsai-outlet.analytics_250808038.ga4_historical_summary` AS hb
+            GROUP BY 1, 2
+          )
           GROUP BY 1, 2
         ),
         amazon_orders_weekly AS (

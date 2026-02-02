@@ -140,10 +140,24 @@ function updateKPIs(data, prevPeriodData) {
     const cards = document.querySelectorAll('.kpi-card');
     cards.forEach(card => {
         const cardChannel = card.dataset.channel;
-        if (currentChannelFilter === 'all' || cardChannel === 'all' || cardChannel === currentChannelFilter) {
-            card.classList.remove('hidden');
+
+        // Google Analytics cards are ONLY shown in the google_analytics tab
+        if (cardChannel === 'google_analytics') {
+            if (currentChannelFilter === 'google_analytics') {
+                card.classList.remove('hidden');
+            } else {
+                card.classList.add('hidden');
+            }
         } else {
-            card.classList.add('hidden');
+            // Non-GA cards: show if filter is 'all' or matches channel
+            // EXCEPTION: hide when in google_analytics tab
+            if (currentChannelFilter === 'google_analytics') {
+                card.classList.add('hidden');
+            } else if (currentChannelFilter === 'all' || cardChannel === 'all' || cardChannel === currentChannelFilter) {
+                card.classList.remove('hidden');
+            } else {
+                card.classList.add('hidden');
+            }
         }
     });
 
@@ -169,6 +183,13 @@ function updateKPIs(data, prevPeriodData) {
         channelMixCard.classList.remove('hidden');
     } else {
         channelMixCard.classList.add('hidden');
+    }
+
+    const gaTrafficTrendCard = document.getElementById('gaTrafficTrendCard');
+    if (currentChannelFilter === 'google_analytics') {
+        gaTrafficTrendCard.classList.remove('hidden');
+    } else {
+        gaTrafficTrendCard.classList.add('hidden');
     }
 
 
@@ -392,8 +413,22 @@ function updateKPIs(data, prevPeriodData) {
         document.getElementById('returningCustomersPrev').textContent = `LY: ${formatNumber(prevReturning)}`;
     }
 
+    // Bonsai Users (from GA4)
+    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
+        document.getElementById('bonsaiUsers').textContent = 'N/A';
+        updateChangeElement('bonsaiUsersChange', 0);
+        document.getElementById('bonsaiUsersPrev').textContent = '';
+    } else {
+        const totalBonsaiUsers = data.reduce((sum, d) => sum + (d.bonsai_users || 0), 0);
+        const prevBonsaiUsers = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_users || 0), 0);
+        document.getElementById('bonsaiUsers').textContent = formatNumber(totalBonsaiUsers);
+        const userChange = totalBonsaiUsers - prevBonsaiUsers;
+        updateChangeElement('bonsaiUsersChange', userChange, 'vs LY');
+        document.getElementById('bonsaiUsersPrev').textContent = `LY: ${formatNumber(prevBonsaiUsers)}`;
+    }
+
     // Bonsai Sessions (from GA4)
-    if (currentChannelFilter === 'amazon') {
+    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
         document.getElementById('bonsaiSessions').textContent = 'N/A';
         updateChangeElement('bonsaiSessionsChange', 0);
         document.getElementById('bonsaiSessionsPrev').textContent = '';
@@ -407,7 +442,7 @@ function updateKPIs(data, prevPeriodData) {
     }
 
     // Bonsai Conv Rate (from GA4)
-    if (currentChannelFilter === 'amazon') {
+    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
         document.getElementById('bonsaiConvRate').textContent = 'N/A';
         updateChangeElement('bonsaiCvrChange', 0);
         document.getElementById('bonsaiCvrPrev').textContent = '';
@@ -457,6 +492,12 @@ function updateCharts(data) {
         runUpdate('Bonsai Customer Breakdown', updateCustomerTypeTrendChart, reversedData);
     } else {
         if (charts.customerTypeTrend) charts.customerTypeTrend.destroy();
+    }
+
+    if (currentChannelFilter === 'google_analytics') {
+        runUpdate('GA Traffic Trend', updateGATrafficChart, reversedData);
+    } else {
+        if (charts.gaTrafficTrend) charts.gaTrafficTrend.destroy();
     }
 }
 
@@ -774,6 +815,41 @@ function updateCustomerTypeTrendChart(data) {
                 y: { ...getChartOptions('Customers').scales.y, stacked: true }
             }
         }
+    });
+}
+
+// GA Traffic Trend Chart
+function updateGATrafficChart(data) {
+    const ctx = document.getElementById('gaTrafficTrendChart');
+
+    if (charts.gaTrafficTrend) {
+        charts.gaTrafficTrend.destroy();
+    }
+
+    charts.gaTrafficTrend = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: data.map(d => formatDate(d.week_start)),
+            datasets: [
+                {
+                    label: 'Sessions',
+                    data: data.map(d => d.bonsai_sessions || 0),
+                    borderColor: '#10b981',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Users',
+                    data: data.map(d => d.bonsai_users || 0),
+                    borderColor: '#6366f1',
+                    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                }
+            ]
+        },
+        options: getChartOptions('Count')
     });
 }
 

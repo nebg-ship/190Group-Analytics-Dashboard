@@ -25,6 +25,7 @@
                         <button class="channel-btn" data-channel="amazon">Amazon Only</button>
                         <button class="channel-btn" data-channel="bonsai">Bonsai Only</button>
                         <button class="channel-btn" data-channel="wholesale">Wholesale Only</button>
+                        <button class="channel-btn" data-channel="google_analytics">Google Analytics</button>
                     </div>
                 </div>
                 <div class="filter-group">
@@ -212,7 +213,7 @@
                 </div>
             </div>
 
-            <div class="kpi-card" data-channel="bonsai">
+            <div class="kpi-card" data-channel="google_analytics">
                 <div class="kpi-icon">🌐</div>
                 <div class="kpi-content">
                     <h3>Bonsai Sessions</h3>
@@ -224,7 +225,19 @@
                 </div>
             </div>
 
-            <div class="kpi-card" data-channel="bonsai">
+            <div class="kpi-card" data-channel="google_analytics">
+                <div class="kpi-icon">👥</div>
+                <div class="kpi-content">
+                    <h3>Bonsai Users</h3>
+                    <p class="kpi-value" id="bonsaiUsers">0</p>
+                    <div class="kpi-meta">
+                        <p class="kpi-change" id="bonsaiUsersChange">-</p>
+                        <p class="kpi-prev" id="bonsaiUsersPrev">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="kpi-card" data-channel="google_analytics">
                 <div class="kpi-icon">🎯</div>
                 <div class="kpi-content">
                     <h3>Bonsai Conv Rate</h3>
@@ -267,6 +280,11 @@
             <div class="chart-card large" id="customerTypeTrendCard">
                 <h3>New vs Returning Customers (Bonsai)</h3>
                 <canvas id="customerTypeTrendChart"></canvas>
+            </div>
+
+            <div class="chart-card large" id="gaTrafficTrendCard">
+                <h3>GA Traffic Trend (Sessions)</h3>
+                <canvas id="gaTrafficTrendChart"></canvas>
             </div>
         </section>
 
