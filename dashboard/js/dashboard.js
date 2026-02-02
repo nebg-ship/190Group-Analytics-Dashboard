@@ -112,13 +112,20 @@ function updateDashboard() {
         filteredData = dashboardData.slice(0, isNaN(weeks) ? 4 : weeks);
     }
 
-    // Find the comparison period (same weeks last year)
+    // Find the comparison period (fuzzy matching for same weeks last year)
     const prevPeriodData = filteredData.map(d => {
         const currentWeekDate = new Date(d.week_start + 'T00:00:00Z');
         const targetDate = new Date(currentWeekDate);
         targetDate.setUTCDate(targetDate.getUTCDate() - 364);
-        const targetStr = targetDate.toISOString().split('T')[0];
-        const match = dashboardData.find(w => w.week_start === targetStr);
+
+        // Fuzzy search: find a week that starts within +/- 3 days of the target
+        // This handles year boundaries and split-week alignment
+        const match = dashboardData.find(w => {
+            const wDate = new Date(w.week_start + 'T00:00:00Z');
+            const diffDays = Math.abs((wDate - targetDate) / (1000 * 60 * 60 * 24));
+            return diffDays <= 3;
+        });
+
         return match;
     }).filter(w => !!w);
 

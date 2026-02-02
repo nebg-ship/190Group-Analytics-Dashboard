@@ -57,8 +57,8 @@ def get_dashboard_data():
             GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), YEAR)) as week_start,
             EXTRACT(YEAR FROM DATE(order_created_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders,
-            ROUND(SUM(CAST(total_including_tax AS FLOAT64)), 2) as total_revenue,
-            ROUND(AVG(CAST(total_including_tax AS FLOAT64)), 2) as avg_order_value,
+            ROUND(SUM(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as total_revenue,
+            ROUND(AVG(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as avg_order_value,
             COUNT(DISTINCT customer_id) as unique_customers
           FROM `bonsai-outlet.sales.bc_order`
           WHERE DATE(order_created_date_time) >= '2025-01-01'
