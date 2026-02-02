@@ -4,318 +4,357 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>190 Group - CEO Dashboard</title>
+    <title>190 Group - Executive Overview</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Manrope:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="css/dashboard.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 
 <body>
-    <div class="dashboard-container">
-        <!-- Header -->
-        <header class="dashboard-header">
-            <div class="header-content">
-                <h1>190 Group Analytics</h1>
-                <p class="subtitle">CEO Dashboard</p>
+    <div class="dashboard">
+        <header class="global-header">
+            <div class="header-left">
+                <div class="brand">
+                    <div class="brand-mark">190</div>
+                    <div class="brand-text">
+                        <div class="brand-title">190 Group Analytics</div>
+                        <div class="brand-subtitle">Executive Overview</div>
+                    </div>
+                </div>
             </div>
-            <div class="header-actions">
-                <div class="filter-group">
-                    <label>Channel:</label>
-                    <div class="channel-filter">
-                        <button class="channel-btn active" data-channel="all">All Channels</button>
-                        <button class="channel-btn" data-channel="amazon">Amazon Only</button>
-                        <button class="channel-btn" data-channel="bonsai">Bonsai Only</button>
-                        <button class="channel-btn" data-channel="wholesale">Wholesale Only</button>
-                        <button class="channel-btn" data-channel="google_analytics">Google Analytics</button>
+
+            <div class="header-center">
+                <div class="date-controls">
+                    <div class="segmented-control" id="dateRangeControl">
+                        <button class="segment-btn" data-range="today">Today</button>
+                        <button class="segment-btn" data-range="last7">Last 7</button>
+                        <button class="segment-btn" data-range="last30">Last 30</button>
+                        <button class="segment-btn" data-range="mtd">MTD</button>
+                        <button class="segment-btn" data-range="qtd">QTD</button>
+                        <button class="segment-btn active" data-range="ytd">YTD</button>
+                        <button class="segment-btn" data-range="custom">Custom</button>
+                    </div>
+                    <div class="comparison-control">
+                        <label for="comparisonSelect">Compare</label>
+                        <select id="comparisonSelect">
+                            <option value="prior-period">vs prior period</option>
+                            <option value="prior-year">vs prior year</option>
+                        </select>
                     </div>
                 </div>
-                <div class="filter-group">
-                    <label>Time Period:</label>
-                    <div class="time-filter">
-                        <button class="filter-btn" data-period="month">Current Month</button>
-                        <button class="filter-btn" data-period="last-month">Last Month</button>
-                        <button class="filter-btn" data-period="quarter">This Quarter</button>
-                        <button class="filter-btn active" data-period="ytd">YTD</button>
-                    </div>
+                <div class="custom-range hidden" id="customRange">
+                    <label>
+                        Start
+                        <input type="date" id="customStart">
+                    </label>
+                    <label>
+                        End
+                        <input type="date" id="customEnd">
+                    </label>
+                    <button class="apply-btn" id="applyCustomRange">Apply</button>
                 </div>
-                <div class="last-updated" id="lastUpdated">Loading...</div>
+            </div>
+
+            <div class="header-right">
+                <div class="context-chip" id="lastUpdated">Data last refreshed: --</div>
+                <button class="icon-btn" id="notesBtn">Notes</button>
+                <button class="alert-btn" id="alertsBtn">
+                    Alerts
+                    <span class="alert-count" id="alertsCount">0</span>
+                </button>
             </div>
         </header>
 
-        <!-- Loading State -->
-        <div class="loading-overlay" id="loadingOverlay">
-            <div class="spinner"></div>
-            <p>Loading dashboard data...</p>
+        <section class="filter-row">
+            <div class="filter">
+                <label for="filterChannel">Channel</label>
+                <select id="filterChannel">
+                    <option value="all">All Channels</option>
+                    <option value="bonsai">Online Storefront</option>
+                    <option value="amazon">Amazon</option>
+                    <option value="wholesale">Wholesale</option>
+                    <option value="retail">Retail (Not Connected)</option>
+                </select>
+            </div>
+            <div class="filter">
+                <label for="filterGeography">Geography</label>
+                <select id="filterGeography">
+                    <option value="all">All Regions</option>
+                    <option value="us">United States</option>
+                    <option value="ca">Canada</option>
+                    <option value="eu">Europe (Not Connected)</option>
+                </select>
+            </div>
+            <div class="filter">
+                <label for="filterCustomerType">Customer Type</label>
+                <select id="filterCustomerType">
+                    <option value="all">All Customers</option>
+                    <option value="new">New</option>
+                    <option value="returning">Returning</option>
+                    <option value="trade">Retail vs Trade (Not Connected)</option>
+                </select>
+            </div>
+            <div class="filter">
+                <label for="filterCategory">Category</label>
+                <select id="filterCategory">
+                    <option value="all">All Categories</option>
+                    <option value="tree">Tree</option>
+                    <option value="pot">Pot</option>
+                    <option value="tools">Tools</option>
+                    <option value="soil">Soil</option>
+                    <option value="accessories">Accessories</option>
+                </select>
+            </div>
+            <div class="filter">
+                <label for="filterDevice">Device</label>
+                <select id="filterDevice">
+                    <option value="all">All Devices</option>
+                    <option value="desktop">Desktop</option>
+                    <option value="mobile">Mobile</option>
+                    <option value="tablet">Tablet</option>
+                </select>
+            </div>
+            <button class="advanced-btn" id="advancedBtn">Advanced</button>
+        </section>
+
+        <main class="overview">
+            <section class="kpi-grid">
+                <button class="kpi-tile" data-metric="net_revenue">
+                    <div class="kpi-label"
+                        data-tooltip="Sum of online storefront, Amazon, and wholesale revenue (or selected channel) for the period.">
+                        Net Revenue
+                    </div>
+                    <div class="kpi-value" id="kpiNetRevenue">$0</div>
+                    <div class="kpi-meta" id="kpiNetRevenueMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="gross_profit">
+                    <div class="kpi-label"
+                        data-tooltip="Estimated profit = storefront revenue + Amazon net proceeds + wholesale revenue. Channel views other than Amazon are not connected.">
+                        Estimated Gross Profit
+                    </div>
+                    <div class="kpi-value" id="kpiGrossProfit">$0</div>
+                    <div class="kpi-meta" id="kpiGrossProfitMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="contribution_margin">
+                    <div class="kpi-label"
+                        data-tooltip="Estimated profit divided by net revenue. Available for All or Amazon views.">
+                        Contribution Margin %
+                    </div>
+                    <div class="kpi-value" id="kpiContributionMargin">0%</div>
+                    <div class="kpi-meta" id="kpiContributionMarginMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="orders">
+                    <div class="kpi-label"
+                        data-tooltip="Total orders across channels (or selected channel) for the period.">Orders</div>
+                    <div class="kpi-value" id="kpiOrders">0</div>
+                    <div class="kpi-meta" id="kpiOrdersMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="aov">
+                    <div class="kpi-label"
+                        data-tooltip="Average order value = net revenue / total orders for the selected scope.">AOV</div>
+                    <div class="kpi-value" id="kpiAov">$0</div>
+                    <div class="kpi-meta" id="kpiAovMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="units">
+                    <div class="kpi-label" data-tooltip="Amazon units shipped.">Units (Amazon)</div>
+                    <div class="kpi-value" id="kpiUnits">0</div>
+                    <div class="kpi-meta" id="kpiUnitsMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="marketing_spend">
+                    <div class="kpi-label" data-tooltip="Marketing spend and MER data are not connected yet.">
+                        Marketing Spend / MER
+                    </div>
+                    <div class="kpi-value" id="kpiMarketingSpend">Not Connected</div>
+                    <div class="kpi-meta" id="kpiMarketingSpendMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="inventory_cover">
+                    <div class="kpi-label" data-tooltip="Inventory coverage and stockouts are not connected yet.">
+                        Inventory Cover
+                    </div>
+                    <div class="kpi-value" id="kpiInventoryCover">Not Connected</div>
+                    <div class="kpi-meta" id="kpiInventoryCoverMeta">--</div>
+                </button>
+            </section>
+
+            <section class="layout-row two-col">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Channel Mix + Efficiency</h3>
+                        <span class="card-subtitle">Revenue by channel over time</span>
+                    </div>
+                    <canvas id="channelMixTrendChart"></canvas>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Channel Efficiency</h3>
+                        <span class="card-subtitle">Revenue, GM%, order share, revenue change</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="data-table" id="channelEfficiencyTable">
+                            <thead>
+                                <tr>
+                                    <th>Channel</th>
+                                    <th>Revenue</th>
+                                    <th>GM%</th>
+                                    <th>Order Share</th>
+                                    <th>Revenue Change</th>
+                                    <th>Returns%</th>
+                                    <th>Fulfillment SLA</th>
+                                </tr>
+                            </thead>
+                            <tbody id="channelEfficiencyBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <section class="layout-row two-col">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Revenue Change vs Comparison</h3>
+                        <span class="card-subtitle">Volume vs Price/AOV vs Mix</span>
+                    </div>
+                    <canvas id="revenueWaterfallChart"></canvas>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>What Changed?</h3>
+                        <span class="card-subtitle">Top drivers of change</span>
+                    </div>
+                    <div class="driver-columns">
+                        <div>
+                            <div class="driver-title positive">Top 5 Positive</div>
+                            <ul class="driver-list" id="positiveDrivers"></ul>
+                        </div>
+                        <div>
+                            <div class="driver-title negative">Top 5 Negative</div>
+                            <ul class="driver-list" id="negativeDrivers"></ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="layout-row two-col">
+                <div class="card" id="risksPanel">
+                    <div class="card-header">
+                        <h3>Risks & Opportunities</h3>
+                        <span class="card-subtitle">Alerts and operational signals</span>
+                    </div>
+                    <ul class="alert-list" id="risksList"></ul>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Driver Decomposition</h3>
+                        <span class="card-subtitle">Delta Revenue and Delta Gross Profit</span>
+                    </div>
+                    <div class="formula">
+                        <div>Delta Revenue approx Delta Orders x AOV (split into price vs mix)</div>
+                        <div>Delta Gross Profit = Delta Revenue x GM% + Revenue x Delta GM%</div>
+                    </div>
+                    <canvas id="decompositionChart"></canvas>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <aside class="side-panel" id="explainPanel" aria-hidden="true">
+        <div class="side-panel-header">
+            <div>
+                <div class="panel-title">Explain</div>
+                <div class="panel-subtitle" id="panelMetricTitle">Net Revenue</div>
+            </div>
+            <button class="icon-btn" id="panelClose">Close</button>
         </div>
-
-        <!-- Error State -->
-        <div class="error-message" id="errorMessage" style="display: none;">
-            <p>Failed to load dashboard data. Please try again.</p>
-            <button onclick="location.reload()">Retry</button>
+        <div class="panel-tabs">
+            <button class="tab-btn active" data-tab="channel">Channel</button>
+            <button class="tab-btn" data-tab="category">Category</button>
+            <button class="tab-btn" data-tab="marketing">Marketing Source</button>
+            <button class="tab-btn" data-tab="notes">Notes</button>
         </div>
-
-        <!-- KPI Cards -->
-        <section class="kpi-section">
-            <div class="kpi-card" data-channel="all">
-                <div class="kpi-icon">💰</div>
-                <div class="kpi-content">
-                    <h3>Total Revenue</h3>
-                    <p class="kpi-value" id="totalRevenue">$0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="revenueChange">-</p>
-                        <p class="kpi-prev" id="revenuePrev">-</p>
-                    </div>
+        <div class="panel-body">
+            <div class="panel-tab active" id="panelTab-channel">
+                <div class="panel-section-title">Decomposition by channel</div>
+                <ul class="panel-list" id="panelChannelBreakdown"></ul>
+            </div>
+            <div class="panel-tab" id="panelTab-category">
+                <div class="panel-placeholder">Category drivers are not yet connected.</div>
+            </div>
+            <div class="panel-tab" id="panelTab-marketing">
+                <div class="panel-placeholder">Marketing source drivers are not yet connected.</div>
+            </div>
+            <div class="panel-tab" id="panelTab-notes">
+                <div class="panel-section-title">Annotations</div>
+                <ul class="panel-list" id="notesList"></ul>
+                <div class="note-form">
+                    <textarea id="noteInput" rows="3" placeholder="Add a note for this date range..."></textarea>
+                    <button class="apply-btn" id="addNoteBtn">Add Note</button>
                 </div>
             </div>
+        </div>
+    </aside>
 
-
-
-            <div class="kpi-card" data-channel="all">
-                <div class="kpi-icon">📅</div>
-                <div class="kpi-content">
-                    <h3>YoY Growth</h3>
-                    <p class="kpi-value" id="yoyGrowth">0%</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="yoyChange">-</p>
-                        <p class="kpi-prev" id="yoyPrev">-</p>
-                    </div>
+    <aside class="drawer" id="advancedDrawer" aria-hidden="true">
+        <div class="drawer-header">
+            <div>
+                <div class="drawer-title">Advanced Filters</div>
+                <div class="drawer-subtitle">Optional cuts and toggles</div>
+            </div>
+            <button class="icon-btn" id="advancedClose">Close</button>
+        </div>
+        <div class="drawer-body">
+            <div class="drawer-group">
+                <div class="drawer-label">Fulfillment Type</div>
+                <div class="drawer-options">
+                    <label><input type="checkbox" checked> FBA</label>
+                    <label><input type="checkbox" checked> FBM</label>
+                    <label><input type="checkbox"> Dropship (Not Connected)</label>
                 </div>
             </div>
-
-            <div class="kpi-card" data-channel="bonsai">
-                <div class="kpi-icon">🛒</div>
-                <div class="kpi-content">
-                    <h3>Bonsai Orders</h3>
-                    <p class="kpi-value" id="bonsaiOrders">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="ordersChange">-</p>
-                        <p class="kpi-prev" id="ordersPrev">-</p>
-                    </div>
+            <div class="drawer-group">
+                <div class="drawer-label">Marketing Channel</div>
+                <div class="drawer-options">
+                    <label><input type="checkbox" checked> Paid Search (Not Connected)</label>
+                    <label><input type="checkbox"> Paid Social (Not Connected)</label>
+                    <label><input type="checkbox"> Organic (Not Connected)</label>
                 </div>
             </div>
-
-            <div class="kpi-card" data-channel="amazon">
-                <div class="kpi-icon">📦</div>
-                <div class="kpi-content">
-                    <h3>Amazon Units</h3>
-                    <p class="kpi-value" id="amazonUnits">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="unitsChange">-</p>
-                        <p class="kpi-prev" id="unitsPrev">-</p>
-                    </div>
+            <div class="drawer-group">
+                <div class="drawer-label">Operational Flags</div>
+                <div class="drawer-options">
+                    <label><input type="checkbox"> Stockouts</label>
+                    <label><input type="checkbox"> Buy Box Loss (Not Connected)</label>
                 </div>
             </div>
+        </div>
+    </aside>
 
-            <div class="kpi-card" data-channel="wholesale">
-                <div class="kpi-icon">🏢</div>
-                <div class="kpi-content">
-                    <h3>Wholesale Orders</h3>
-                    <p class="kpi-value" id="wholesaleOrders">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="wholesaleOrdersChange">-</p>
-                        <p class="kpi-prev" id="wholesaleOrdersPrev">-</p>
-                    </div>
-                </div>
+    <aside class="drawer" id="alertsDrawer" aria-hidden="true">
+        <div class="drawer-header">
+            <div>
+                <div class="drawer-title">Alerts</div>
+                <div class="drawer-subtitle">Threshold-based signals</div>
             </div>
+            <button class="icon-btn" id="alertsClose">Close</button>
+        </div>
+        <div class="drawer-body">
+            <ul class="alert-list" id="alertsList"></ul>
+        </div>
+    </aside>
 
-            <div class="kpi-card" data-channel="amazon">
-                <div class="kpi-icon">🖱️</div>
-                <div class="kpi-content">
-                    <h3>Amazon Sessions</h3>
-                    <p class="kpi-value" id="amazonSessions">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="sessionsChange">-</p>
-                        <p class="kpi-prev" id="sessionsPrev">-</p>
-                    </div>
-                </div>
-            </div>
+    <div class="overlay hidden" id="overlay"></div>
 
-            <div class="kpi-card" data-channel="amazon">
-                <div class="kpi-icon">🎯</div>
-                <div class="kpi-content">
-                    <h3>Amazon Conv Rate</h3>
-                    <p class="kpi-value" id="amazonConvRate">0%</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="cvrChange">-</p>
-                        <p class="kpi-prev" id="cvrPrev">-</p>
-                    </div>
-                </div>
-            </div>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <p>Loading dashboard data...</p>
+    </div>
 
-            <div class="kpi-card" data-channel="all">
-                <div class="kpi-icon">💳</div>
-                <div class="kpi-content">
-                    <h3>Avg Order Value</h3>
-                    <p class="kpi-value" id="avgOrderValue">$0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="aovChange">-</p>
-                        <p class="kpi-prev" id="aovPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="amazon">
-                <div class="kpi-icon">💵</div>
-                <div class="kpi-content">
-                    <h3>Amazon Margin</h3>
-                    <p class="kpi-value" id="amazonMargin">0%</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="marginChange">-</p>
-                        <p class="kpi-prev" id="marginPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="amazon">
-                <div class="kpi-icon">💰</div>
-                <div class="kpi-content">
-                    <h3>Amazon Net Proceeds</h3>
-                    <p class="kpi-value" id="amazonNetProceeds">$0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="netProceedsChange">-</p>
-                        <p class="kpi-prev" id="netProceedsPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="bonsai">
-                <div class="kpi-icon">👥</div>
-                <div class="kpi-content">
-                    <h3>Customers</h3>
-                    <p class="kpi-value" id="customers">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="customersChange">-</p>
-                        <p class="kpi-prev" id="customersPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="bonsai">
-                <div class="kpi-icon">✨</div>
-                <div class="kpi-content">
-                    <h3>New Customers</h3>
-                    <p class="kpi-value" id="newCustomers">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="newCustomersChange">-</p>
-                        <p class="kpi-prev" id="newCustomersPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="bonsai">
-                <div class="kpi-icon">🔄</div>
-                <div class="kpi-content">
-                    <h3>Returning</h3>
-                    <p class="kpi-value" id="returningCustomers">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="returningCustomersChange">-</p>
-                        <p class="kpi-prev" id="returningCustomersPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="google_analytics">
-                <div class="kpi-icon">🌐</div>
-                <div class="kpi-content">
-                    <h3>Bonsai Sessions</h3>
-                    <p class="kpi-value" id="bonsaiSessions">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="bonsaiSessionsChange">-</p>
-                        <p class="kpi-prev" id="bonsaiSessionsPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="google_analytics">
-                <div class="kpi-icon">👥</div>
-                <div class="kpi-content">
-                    <h3>Bonsai Users</h3>
-                    <p class="kpi-value" id="bonsaiUsers">0</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="bonsaiUsersChange">-</p>
-                        <p class="kpi-prev" id="bonsaiUsersPrev">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="kpi-card" data-channel="google_analytics">
-                <div class="kpi-icon">🎯</div>
-                <div class="kpi-content">
-                    <h3>Bonsai Conv Rate</h3>
-                    <p class="kpi-value" id="bonsaiConvRate">0%</p>
-                    <div class="kpi-meta">
-                        <p class="kpi-change" id="bonsaiCvrChange">-</p>
-                        <p class="kpi-prev" id="bonsaiCvrPrev">-</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Charts Section -->
-        <section class="charts-section">
-            <div class="chart-card large">
-                <h3>Revenue Trend</h3>
-                <canvas id="revenueTrendChart"></canvas>
-            </div>
-
-            <div class="chart-card" id="channelMixCard">
-                <h3>Channel Mix</h3>
-                <canvas id="channelMixChart"></canvas>
-            </div>
-
-            <div class="chart-card">
-                <h3>WoW Revenue Growth (%)</h3>
-                <canvas id="wowTrendChart"></canvas>
-            </div>
-
-            <div class="chart-card">
-                <h3>YoY Revenue Growth (%)</h3>
-                <canvas id="yoyTrendChart"></canvas>
-            </div>
-
-            <div class="chart-card large">
-                <h3>Year-over-Year Comparison</h3>
-                <canvas id="yoyComparisonChart"></canvas>
-            </div>
-
-            <div class="chart-card large" id="customerTypeTrendCard">
-                <h3>New vs Returning Customers (Bonsai)</h3>
-                <canvas id="customerTypeTrendChart"></canvas>
-            </div>
-
-            <div class="chart-card large" id="gaTrafficTrendCard">
-                <h3>GA Traffic Trend (Sessions)</h3>
-                <canvas id="gaTrafficTrendChart"></canvas>
-            </div>
-        </section>
-
-        <!-- Wholesale Top Customers (Hidden by default) -->
-        <section id="wholesaleCustomersSection" class="kpi-section hidden"
-            style="display: block; width: 100%; margin-top: 2rem;">
-            <div class="card"
-                style="width: 100%; padding: 1.5rem; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
-                <h3 style="color: var(--text-muted); font-size: 0.875rem; font-weight: 500; margin-bottom: 1rem;">Top
-                    Wholesale Customers (2026 YTD)</h3>
-                <div style="overflow-x: auto;">
-                    <table style="width: 100%; text-align: left; border-collapse: collapse;">
-                        <thead
-                            style="background: rgba(55, 65, 81, 0.5); text-transform: uppercase; font-size: 0.75rem; color: var(--text-muted);">
-                            <tr>
-                                <th style="padding: 0.75rem 1.5rem; border-top-left-radius: 0.5rem;">Company Name</th>
-                                <th style="padding: 0.75rem 1.5rem;">Contact Name</th>
-                                <th style="padding: 0.75rem 1.5rem;">Total Orders</th>
-                                <th
-                                    style="padding: 0.75rem 1.5rem; border-top-right-radius: 0.5rem; text-align: right;">
-                                    Total Revenue</th>
-                            </tr>
-                        </thead>
-                        <tbody id="wholesaleCustomersTableBody"
-                            style="font-size: 0.875rem; color: var(--text-secondary);">
-                            <!-- Data will be populated here -->
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </section>
+    <div class="error-message" id="errorMessage" style="display: none;">
+        <p>Failed to load dashboard data. Please try again.</p>
+        <button onclick="location.reload()">Retry</button>
     </div>
 
     <script src="js/dashboard.js"></script>

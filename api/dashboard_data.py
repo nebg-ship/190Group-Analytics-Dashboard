@@ -2,7 +2,7 @@
 CEO Dashboard API - Data endpoint for fetching combined Amazon + Bonsai metrics
 """
 import os
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request
 from flask_cors import CORS
 from google.cloud import bigquery
 from dotenv import load_dotenv
@@ -19,9 +19,92 @@ CORS(app)
 PROJECT_ROOT = Path(__file__).parent.parent
 
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT')
+SALES_DATASET = 'sales'
+
+# Hardwired BigCommerce line-item table + columns (per user confirmation)
+LINE_ITEMS_TABLE = 'bc_order_product'
+LINE_ITEMS_SKU_COL = 'sku'
+LINE_ITEMS_NAME_COL = 'product_name'
+LINE_ITEMS_QTY_COL = 'quantity'
+LINE_ITEMS_ORDER_ID_COL = 'order_id'
+LINE_ITEMS_TOTAL_COL = 'total_ex_tax'
 
 def get_bigquery_client():
     return bigquery.Client(project=PROJECT_ID)
+
+def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=None):
+    table_name = LINE_ITEMS_TABLE
+    sku_expr = f"CAST(li.`{LINE_ITEMS_SKU_COL}` AS STRING)"
+    name_expr = f"CAST(li.`{LINE_ITEMS_NAME_COL}` AS STRING)"
+    units_value_expr = f"COALESCE(SAFE_CAST(li.`{LINE_ITEMS_QTY_COL}` AS INT64), 0)"
+    revenue_value_expr = f"COALESCE(SAFE_CAST(li.`{LINE_ITEMS_TOTAL_COL}` AS FLOAT64), 0)"
+
+    base_query = f"""
+        WITH orders AS (
+            SELECT order_id
+            FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
+            WHERE DATE(order_created_date_time) BETWEEN @start_date AND @end_date
+              AND order_status_id NOT IN (0, 3, 5, 6)
+        )
+        SELECT
+            {sku_expr} AS sku,
+            {name_expr} AS product_name,
+            SUM({units_value_expr}) AS units,
+            ROUND(SUM({revenue_value_expr}), 2) AS revenue
+        FROM `{PROJECT_ID}.{SALES_DATASET}.{table_name}` AS li
+        JOIN orders o ON li.`{LINE_ITEMS_ORDER_ID_COL}` = o.order_id
+        WHERE {sku_expr} IS NOT NULL AND {sku_expr} != ''
+        GROUP BY 1, 2
+        ORDER BY revenue DESC
+        LIMIT 1
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter('start_date', 'DATE', start_date),
+            bigquery.ScalarQueryParameter('end_date', 'DATE', end_date)
+        ]
+    )
+    current_row = next(iter(client.query(base_query, job_config=job_config).result()), None)
+    if not current_row:
+        return None
+
+    result = {
+        'sku': current_row.get('sku'),
+        'name': current_row.get('product_name'),
+        'current_revenue': float(current_row.get('revenue') or 0),
+        'current_units': int(current_row.get('units') or 0),
+        'previous_revenue': 0.0,
+        'previous_units': 0
+    }
+
+    if compare_start and compare_end:
+        compare_query = f"""
+            WITH orders AS (
+                SELECT order_id
+                FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
+                WHERE DATE(order_created_date_time) BETWEEN @start_date AND @end_date
+                  AND order_status_id NOT IN (0, 3, 5, 6)
+            )
+            SELECT
+                SUM({units_value_expr}) AS units,
+                ROUND(SUM({revenue_value_expr}), 2) AS revenue
+            FROM `{PROJECT_ID}.{SALES_DATASET}.{table_name}` AS li
+            JOIN orders o ON li.`{LINE_ITEMS_ORDER_ID_COL}` = o.order_id
+            WHERE {sku_expr} = @sku
+        """
+        compare_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter('start_date', 'DATE', compare_start),
+                bigquery.ScalarQueryParameter('end_date', 'DATE', compare_end),
+                bigquery.ScalarQueryParameter('sku', 'STRING', result['sku'])
+            ]
+        )
+        compare_row = next(iter(client.query(compare_query, job_config=compare_config).result()), None)
+        if compare_row:
+            result['previous_revenue'] = float(compare_row.get('revenue') or 0)
+            result['previous_units'] = int(compare_row.get('units') or 0)
+
+    return result
 
 @app.route('/api/dashboard', methods=['GET'])
 def get_dashboard_data():
@@ -282,6 +365,35 @@ def get_dashboard_data():
 def health_check():
     """Health check endpoint"""
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+
+@app.route('/api/top-sku', methods=['GET'])
+def get_top_sku():
+    """Fetch top Bonsai SKU for a date range."""
+    try:
+        start_date = request.args.get('start')
+        end_date = request.args.get('end')
+        compare_start = request.args.get('compare_start')
+        compare_end = request.args.get('compare_end')
+
+        if not start_date or not end_date:
+            return jsonify({
+                'success': False,
+                'error': 'start and end query parameters are required (YYYY-MM-DD).'
+            }), 400
+
+        client = get_bigquery_client()
+        top_sku = query_top_sku(client, start_date, end_date, compare_start, compare_end)
+
+        return jsonify({
+            'success': True,
+            'top_sku': top_sku,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/')
 def serve_dashboard():

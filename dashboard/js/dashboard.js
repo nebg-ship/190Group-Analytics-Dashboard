@@ -1,44 +1,189 @@
-// CEO Dashboard JavaScript - Data fetching and visualization
+// Executive Overview Dashboard JS
 
 const API_URL = 'http://localhost:5000/api/dashboard';
-let dashboardData = [];
-let wholesaleCustomers = [];
-let currentWeeksFilter = 'ytd';
-let currentChannelFilter = 'all'; // 'all', 'amazon', 'bonsai'
-let charts = {};
+const TOP_SKU_URL = 'http://localhost:5000/api/top-sku';
+const NOTES_STORAGE_KEY = 'executive_notes_v1';
 
-// Initialize dashboard
+let dashboardData = [];
+let charts = {};
+let currentAlerts = [];
+let latestMetrics = null;
+let topSkuData = null;
+let topSkuRequestKey = null;
+const topSkuCache = new Map();
+
+const uiState = {
+    dateRange: 'ytd',
+    comparisonMode: 'prior-period',
+    channel: 'all',
+    geography: 'all',
+    customerType: 'all',
+    category: 'all',
+    device: 'all',
+    advancedOpen: false,
+    panelOpen: false,
+    panelTab: 'channel',
+    activeMetric: 'net_revenue',
+    customRange: {
+        start: '',
+        end: ''
+    }
+};
+
+const KPI_CONFIG = {
+    net_revenue: { valueId: 'kpiNetRevenue', metaId: 'kpiNetRevenueMeta', format: 'currency' },
+    gross_profit: { valueId: 'kpiGrossProfit', metaId: 'kpiGrossProfitMeta', format: 'currency' },
+    contribution_margin: { valueId: 'kpiContributionMargin', metaId: 'kpiContributionMarginMeta', format: 'percent', deltaFormat: 'pp' },
+    orders: { valueId: 'kpiOrders', metaId: 'kpiOrdersMeta', format: 'number' },
+    aov: { valueId: 'kpiAov', metaId: 'kpiAovMeta', format: 'currency' },
+    units: { valueId: 'kpiUnits', metaId: 'kpiUnitsMeta', format: 'number' },
+    marketing_spend: { valueId: 'kpiMarketingSpend', metaId: 'kpiMarketingSpendMeta', format: 'text', placeholder: 'Not Connected' },
+    inventory_cover: { valueId: 'kpiInventoryCover', metaId: 'kpiInventoryCoverMeta', format: 'text', placeholder: 'Not Connected' }
+};
+
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     loadDashboardData();
 });
 
-// Setup event listeners
 function setupEventListeners() {
-    // Time filter buttons
-    const filterButtons = document.querySelectorAll('.filter-btn');
-    filterButtons.forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            filterButtons.forEach(b => b.classList.remove('active'));
-            e.target.classList.add('active');
-            currentWeeksFilter = e.target.dataset.period;
+    document.querySelectorAll('.segment-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.segment-btn').forEach(el => el.classList.remove('active'));
+            btn.classList.add('active');
+            uiState.dateRange = btn.dataset.range;
+            toggleCustomRange(uiState.dateRange === 'custom');
             updateDashboard();
         });
     });
 
-    // Channel filter buttons
-    const channelButtons = document.querySelectorAll('.channel-btn');
-    channelButtons.forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            channelButtons.forEach(b => b.classList.remove('active'));
-            e.target.classList.add('active');
-            currentChannelFilter = e.target.dataset.channel;
-            updateDashboard();
+    const comparisonSelect = document.getElementById('comparisonSelect');
+    comparisonSelect.addEventListener('change', (event) => {
+        uiState.comparisonMode = event.target.value;
+        updateDashboard();
+    });
+
+    bindSelect('filterChannel', (value) => {
+        uiState.channel = value;
+        updateDashboard();
+    });
+    bindSelect('filterGeography', (value) => { uiState.geography = value; });
+    bindSelect('filterCustomerType', (value) => { uiState.customerType = value; });
+    bindSelect('filterCategory', (value) => { uiState.category = value; });
+    bindSelect('filterDevice', (value) => { uiState.device = value; });
+
+    const advancedBtn = document.getElementById('advancedBtn');
+    const advancedClose = document.getElementById('advancedClose');
+    advancedBtn.addEventListener('click', () => toggleDrawer('advancedDrawer', true));
+    advancedClose.addEventListener('click', () => toggleDrawer('advancedDrawer', false));
+
+    const alertsBtn = document.getElementById('alertsBtn');
+    const alertsClose = document.getElementById('alertsClose');
+    alertsBtn.addEventListener('click', () => toggleDrawer('alertsDrawer', true));
+    alertsClose.addEventListener('click', () => toggleDrawer('alertsDrawer', false));
+
+    const notesBtn = document.getElementById('notesBtn');
+    notesBtn.addEventListener('click', () => openPanel('notes'));
+
+    const panelClose = document.getElementById('panelClose');
+    panelClose.addEventListener('click', closePanel);
+
+    const overlay = document.getElementById('overlay');
+    overlay.addEventListener('click', () => {
+        toggleDrawer('advancedDrawer', false);
+        toggleDrawer('alertsDrawer', false);
+        closePanel();
+    });
+
+    document.querySelectorAll('.kpi-tile').forEach(tile => {
+        tile.addEventListener('click', () => {
+            const metric = tile.dataset.metric;
+            uiState.activeMetric = metric;
+            openPanel('channel');
         });
     });
+
+    document.querySelectorAll('.tab-btn').forEach(tab => {
+        tab.addEventListener('click', () => {
+            switchPanelTab(tab.dataset.tab);
+        });
+    });
+
+    document.getElementById('addNoteBtn').addEventListener('click', addNote);
+
+    const applyCustomRange = document.getElementById('applyCustomRange');
+    applyCustomRange.addEventListener('click', () => {
+        uiState.customRange.start = document.getElementById('customStart').value;
+        uiState.customRange.end = document.getElementById('customEnd').value;
+        updateDashboard();
+    });
+
+    document.getElementById('positiveDrivers').addEventListener('click', handleDriverClick);
+    document.getElementById('negativeDrivers').addEventListener('click', handleDriverClick);
+    document.getElementById('risksList').addEventListener('click', handleAlertClick);
+    document.getElementById('alertsList').addEventListener('click', handleAlertClick);
 }
 
-// Load data from API
+function bindSelect(id, onChange) {
+    const el = document.getElementById(id);
+    el.addEventListener('change', (event) => onChange(event.target.value));
+}
+
+function toggleCustomRange(show) {
+    const customRange = document.getElementById('customRange');
+    customRange.classList.toggle('hidden', !show);
+}
+
+function toggleDrawer(id, open) {
+    const drawer = document.getElementById(id);
+    if (open) {
+        drawer.classList.add('open');
+    } else {
+        drawer.classList.remove('open');
+    }
+    updateOverlay();
+}
+
+function openPanel(tab) {
+    uiState.panelOpen = true;
+    uiState.panelTab = tab;
+    const panel = document.getElementById('explainPanel');
+    panel.classList.add('open');
+    switchPanelTab(tab);
+    if (latestMetrics) {
+        renderPanelBreakdown(latestMetrics);
+    }
+    updateOverlay();
+}
+
+function closePanel() {
+    uiState.panelOpen = false;
+    const panel = document.getElementById('explainPanel');
+    panel.classList.remove('open');
+    updateOverlay();
+}
+
+function updateOverlay() {
+    const overlay = document.getElementById('overlay');
+    const panelOpen = document.getElementById('explainPanel').classList.contains('open');
+    const drawerOpen = document.getElementById('advancedDrawer').classList.contains('open')
+        || document.getElementById('alertsDrawer').classList.contains('open');
+    overlay.classList.toggle('hidden', !(panelOpen || drawerOpen));
+}
+
+function switchPanelTab(tab) {
+    uiState.panelTab = tab;
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tab);
+    });
+    document.querySelectorAll('.panel-tab').forEach(panelTab => {
+        panelTab.classList.toggle('active', panelTab.id === `panelTab-${tab}`);
+    });
+    if (tab === 'notes') {
+        renderNotes();
+    }
+}
+
 async function loadDashboardData() {
     const loadingOverlay = document.getElementById('loadingOverlay');
     const errorMessage = document.getElementById('errorMessage');
@@ -50,9 +195,8 @@ async function loadDashboardData() {
         const response = await fetch(API_URL);
         const result = await response.json();
 
-        if (result.success && result.data && result.data.length > 0) {
+        if (result.success && Array.isArray(result.data) && result.data.length > 0) {
             dashboardData = result.data;
-            wholesaleCustomers = result.wholesale_customers || [];
             updateLastUpdated(result.timestamp);
             updateDashboard();
             loadingOverlay.style.display = 'none';
@@ -60,869 +204,833 @@ async function loadDashboardData() {
             throw new Error(result.error || 'No data returned from API');
         }
     } catch (error) {
-        console.error('CRITICAL: Error loading dashboard data:', error);
+        console.error('Error loading dashboard data:', error);
         errorMessage.style.display = 'block';
         errorMessage.querySelector('p').textContent = `Failed to load dashboard data: ${error.message}`;
         loadingOverlay.style.display = 'none';
     }
 }
 
-// Update last updated timestamp
 function updateLastUpdated(timestamp) {
     const lastUpdated = document.getElementById('lastUpdated');
     const date = new Date(timestamp);
-    lastUpdated.textContent = `Updated: ${date.toLocaleString()}`;
+    lastUpdated.textContent = `Data last refreshed: ${date.toLocaleString()}`;
 }
 
-// Update dashboard with filtered data
 function updateDashboard() {
-    let filteredData;
-    const now = new Date();
-    const currentYear = now.getFullYear();
-    const currentMonth = now.getMonth(); // 0-indexed
+    if (!dashboardData.length) return;
 
-    if (currentWeeksFilter === 'ytd') {
-        filteredData = dashboardData.filter(d => Number(d.year) == currentYear);
-    } else if (currentWeeksFilter === 'month') {
-        filteredData = dashboardData.filter(d => {
-            const dDate = new Date(d.week_start + 'T00:00:00Z');
-            return Number(d.year) == currentYear && dDate.getUTCMonth() === currentMonth;
-        });
-    } else if (currentWeeksFilter === 'last-month') {
-        let targetMonth = currentMonth - 1;
-        let targetYear = currentYear;
-        if (targetMonth < 0) {
-            targetMonth = 11;
-            targetYear = currentYear - 1;
-        }
-        filteredData = dashboardData.filter(d => {
-            const dDate = new Date(d.week_start + 'T00:00:00Z');
-            return Number(d.year) == targetYear && dDate.getUTCMonth() === targetMonth;
-        });
-    } else if (currentWeeksFilter === 'quarter') {
-        const currentQuarter = Math.floor(currentMonth / 3);
-        filteredData = dashboardData.filter(d => {
-            const dDate = new Date(d.week_start + 'T00:00:00Z');
-            const dQuarter = Math.floor(dDate.getUTCMonth() / 3);
-            return Number(d.year) == currentYear && dQuarter === currentQuarter;
-        });
-    } else {
-        // Default / Fallback - if it's a number, slice that many weeks
-        const weeks = parseInt(currentWeeksFilter);
-        filteredData = dashboardData.slice(0, isNaN(weeks) ? 4 : weeks);
-    }
+    const filteredData = filterDataByRange(dashboardData, uiState);
+    const comparisonData = getComparisonData(filteredData, dashboardData, uiState);
+    const metrics = computeMetrics(filteredData, comparisonData, uiState);
+    latestMetrics = metrics;
 
-    // Find the comparison period (fuzzy matching for same weeks last year)
-    const prevPeriodData = filteredData.map(d => {
-        const currentWeekDate = new Date(d.week_start + 'T00:00:00Z');
-        const targetDate = new Date(currentWeekDate);
-        targetDate.setUTCDate(targetDate.getUTCDate() - 364);
-
-        // Fuzzy search: find a week that starts within +/- 3 days of the target
-        // This handles year boundaries and split-week alignment
-        const match = dashboardData.find(w => {
-            const wDate = new Date(w.week_start + 'T00:00:00Z');
-            const diffDays = Math.abs((wDate - targetDate) / (1000 * 60 * 60 * 24));
-            return diffDays <= 3;
-        });
-
-        return match;
-    }).filter(w => !!w);
-
-    updateKPIs(filteredData, prevPeriodData);
-    updateCharts(filteredData);
+    renderKpis(metrics, uiState);
+    renderChannelMixChart(filteredData, uiState);
+    renderWaterfallChart(metrics);
+    renderDecompositionChart(metrics);
+    renderChannelEfficiencyTable(metrics);
+    renderDrivers(metrics, topSkuData);
+    updateTopSkuData(filteredData, comparisonData);
+    renderAlerts(metrics);
+    renderPanelBreakdown(metrics);
 }
 
-// Update KPI cards
-function updateKPIs(data, prevPeriodData) {
-    if (!data || !prevPeriodData) return;
+function updateTopSkuData(filteredData, comparisonData) {
+    const currentRange = getWeekRange(filteredData);
+    if (!currentRange) return;
+    const comparisonRange = getWeekRange(comparisonData);
 
-    if (data.length === 0) {
-        // Reset KPIs if no data for period
-        document.querySelectorAll('.kpi-value').forEach(el => el.textContent = '0');
+    const requestKey = [
+        currentRange.start,
+        currentRange.end,
+        comparisonRange ? comparisonRange.start : '',
+        comparisonRange ? comparisonRange.end : ''
+    ].join('|');
+
+    if (topSkuCache.has(requestKey)) {
+        topSkuData = topSkuCache.get(requestKey);
+        renderDrivers(latestMetrics, topSkuData);
         return;
     }
 
-    // Handle card visibility based on channel filter
-    const cards = document.querySelectorAll('.kpi-card');
-    cards.forEach(card => {
-        const cardChannel = card.dataset.channel;
+    if (topSkuRequestKey === requestKey) return;
+    topSkuRequestKey = requestKey;
+    topSkuData = null;
+    renderDrivers(latestMetrics, topSkuData);
 
-        // Google Analytics cards are ONLY shown in the google_analytics tab
-        if (cardChannel === 'google_analytics') {
-            if (currentChannelFilter === 'google_analytics') {
-                card.classList.remove('hidden');
-            } else {
-                card.classList.add('hidden');
-            }
-        } else {
-            // Non-GA cards: show if filter is 'all' or matches channel
-            // EXCEPTION: hide when in google_analytics tab
-            if (currentChannelFilter === 'google_analytics') {
-                card.classList.add('hidden');
-            } else if (currentChannelFilter === 'all' || cardChannel === 'all' || cardChannel === currentChannelFilter) {
-                card.classList.remove('hidden');
-            } else {
-                card.classList.add('hidden');
-            }
-        }
+    fetchTopSku(currentRange, comparisonRange, requestKey);
+}
+
+async function fetchTopSku(currentRange, comparisonRange, requestKey) {
+    const params = new URLSearchParams({
+        start: currentRange.start,
+        end: currentRange.end
     });
-
-    // Handle Wholesale Customers Section visibility
-    const wholesaleSection = document.getElementById('wholesaleCustomersSection');
-    const customerTypeTrendCard = document.getElementById('customerTypeTrendCard');
-    const channelMixCard = document.getElementById('channelMixCard');
-
-    if (currentChannelFilter === 'wholesale') {
-        wholesaleSection.classList.remove('hidden');
-        renderWholesaleCustomers(wholesaleCustomers);
-    } else {
-        wholesaleSection.classList.add('hidden');
+    if (comparisonRange && comparisonRange.start && comparisonRange.end) {
+        params.set('compare_start', comparisonRange.start);
+        params.set('compare_end', comparisonRange.end);
     }
 
-    if (currentChannelFilter === 'bonsai') {
-        customerTypeTrendCard.classList.remove('hidden');
-    } else {
-        customerTypeTrendCard.classList.add('hidden');
-    }
-
-    if (currentChannelFilter === 'all') {
-        channelMixCard.classList.remove('hidden');
-    } else {
-        channelMixCard.classList.add('hidden');
-    }
-
-    const gaTrafficTrendCard = document.getElementById('gaTrafficTrendCard');
-    if (currentChannelFilter === 'google_analytics') {
-        gaTrafficTrendCard.classList.remove('hidden');
-    } else {
-        gaTrafficTrendCard.classList.add('hidden');
-    }
-
-
-    // Calculate totals for current and previous periods based on channel filter
-    let totalRevenue = 0, prevTotalRevenue = 0;
-    let totalBonsaiOrders = 0, prevTotalBonsaiOrders = 0;
-    let totalAmazonUnits = 0, prevTotalAmazonUnits = 0;
-    let totalBonsaiCustomers = 0, prevTotalBonsaiCustomers = 0;
-    let totalAmazonNet = 0, prevTotalAmazonNet = 0;
-
-    if (currentChannelFilter === 'amazon') {
-        totalRevenue = data.reduce((sum, d) => sum + (d.amazon_revenue || 0), 0);
-        prevTotalRevenue = prevPeriodData.reduce((sum, d) => sum + (d.amazon_revenue || 0), 0);
-    } else if (currentChannelFilter === 'bonsai') {
-        totalRevenue = data.reduce((sum, d) => sum + (d.bonsai_revenue || 0), 0);
-        prevTotalRevenue = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_revenue || 0), 0);
-    } else if (currentChannelFilter === 'wholesale') {
-        totalRevenue = data.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
-        prevTotalRevenue = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
-    } else {
-        totalRevenue = data.reduce((sum, d) => sum + (d.total_company_revenue || 0), 0);
-        prevTotalRevenue = prevPeriodData.reduce((sum, d) => sum + (d.total_company_revenue || 0), 0);
-    }
-
-
-
-    // Total Revenue
-    document.getElementById('totalRevenue').textContent = formatCurrency(totalRevenue);
-    const revenueChange = totalRevenue - prevTotalRevenue;
-    updateChangeElement('revenueChange', revenueChange, 'vs LY');
-    document.getElementById('revenuePrev').textContent = `LY: ${formatCurrency(prevTotalRevenue)}`;
-
-    // YoY Growth
-    const yoyGrowth = calculatePercentChange(totalRevenue, prevTotalRevenue);
-    document.getElementById('yoyGrowth').textContent = formatPercent(yoyGrowth);
-    updateChangeElement('yoyChange', yoyGrowth, 'YoY');
-    document.getElementById('yoyPrev').textContent = `LY: ${formatCurrency(prevTotalRevenue)}`;
-
-    // Bonsai Orders
-    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
-        document.getElementById('bonsaiOrders').textContent = 'N/A';
-        updateChangeElement('ordersChange', 0);
-        document.getElementById('ordersPrev').textContent = '';
-    } else {
-        const totalBonsaiOrders = data.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
-        const prevTotalBonsaiOrders = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
-        document.getElementById('bonsaiOrders').textContent = formatNumber(totalBonsaiOrders);
-        const ordersChange = totalBonsaiOrders - prevTotalBonsaiOrders;
-        updateChangeElement('ordersChange', ordersChange, 'vs LY');
-        document.getElementById('ordersPrev').textContent = `LY: ${formatNumber(prevTotalBonsaiOrders)}`;
-    }
-
-    // Wholesale Orders
-    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'bonsai') {
-        document.getElementById('wholesaleOrders').textContent = 'N/A';
-        updateChangeElement('wholesaleOrdersChange', 0);
-        document.getElementById('wholesaleOrdersPrev').textContent = '';
-    } else {
-        const totalWholesaleOrders = data.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
-        const prevWholesaleOrders = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
-        document.getElementById('wholesaleOrders').textContent = formatNumber(totalWholesaleOrders);
-        const ordersChange = totalWholesaleOrders - prevWholesaleOrders;
-        updateChangeElement('wholesaleOrdersChange', ordersChange, 'vs LY');
-        document.getElementById('wholesaleOrdersPrev').textContent = `LY: ${formatNumber(prevWholesaleOrders)}`;
-    }
-
-    // Amazon Units
-    if (currentChannelFilter === 'bonsai') {
-        document.getElementById('amazonUnits').textContent = 'N/A';
-        updateChangeElement('unitsChange', 0);
-        document.getElementById('unitsPrev').textContent = '';
-    } else {
-        totalAmazonUnits = data.reduce((sum, d) => sum + (d.amazon_units || 0), 0);
-        prevTotalAmazonUnits = prevPeriodData.reduce((sum, d) => sum + (d.amazon_units || 0), 0);
-        document.getElementById('amazonUnits').textContent = formatNumber(totalAmazonUnits);
-        const unitsChange = totalAmazonUnits - prevTotalAmazonUnits;
-        updateChangeElement('unitsChange', unitsChange, 'vs LY');
-        document.getElementById('unitsPrev').textContent = `LY: ${formatNumber(prevTotalAmazonUnits)}`;
-    }
-
-    // Amazon Sessions
-    if (currentChannelFilter === 'bonsai') {
-        document.getElementById('amazonSessions').textContent = 'N/A';
-        updateChangeElement('sessionsChange', 0);
-        document.getElementById('sessionsPrev').textContent = '';
-    } else {
-        const totalSessions = data.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
-        const prevSessions = prevPeriodData.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
-        document.getElementById('amazonSessions').textContent = formatNumber(totalSessions);
-        const sessionsChange = totalSessions - prevSessions;
-        updateChangeElement('sessionsChange', sessionsChange, 'vs LY');
-        document.getElementById('sessionsPrev').textContent = `LY: ${formatNumber(prevSessions)}`;
-    }
-
-    // Amazon Conv Rate
-    if (currentChannelFilter === 'bonsai') {
-        document.getElementById('amazonConvRate').textContent = 'N/A';
-        updateChangeElement('cvrChange', 0);
-        document.getElementById('cvrPrev').textContent = '';
-    } else {
-        const totalUnits = data.reduce((sum, d) => sum + (d.amazon_units || 0), 0);
-        const totalSessions = data.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
-        const periodCVR = totalSessions > 0 ? (totalUnits / totalSessions) * 100 : 0;
-
-        const prevUnits = prevPeriodData.reduce((sum, d) => sum + (d.amazon_units || 0), 0);
-        const prevSessions = prevPeriodData.reduce((sum, d) => sum + (d.amazon_sessions || 0), 0);
-        const prevCVR = prevSessions > 0 ? (prevUnits / prevSessions) * 100 : 0;
-
-        document.getElementById('amazonConvRate').textContent = formatPercent(periodCVR);
-        const cvrChange = periodCVR - prevCVR;
-        updateChangeElement('cvrChange', cvrChange, 'pp LY');
-        document.getElementById('cvrPrev').textContent = `LY: ${formatPercent(prevCVR)}`;
-    }
-
-    // Average Order Value
-    if (currentChannelFilter === 'amazon') {
-        const totalAmazonRev = data.reduce((sum, d) => sum + (d.amazon_revenue || 0), 0);
-        const orders = data.reduce((sum, d) => sum + (d.amazon_orders || 0), 0);
-        const periodAOV = orders > 0 ? totalAmazonRev / orders : 0;
-
-        const prevAmazonRev = prevPeriodData.reduce((sum, d) => sum + (d.amazon_revenue || 0), 0);
-        const prevOrders = prevPeriodData.reduce((sum, d) => sum + (d.amazon_orders || 0), 0);
-        const prevAOV = prevOrders > 0 ? prevAmazonRev / prevOrders : 0;
-
-        document.getElementById('avgOrderValue').textContent = formatCurrency(periodAOV);
-        const aovChange = periodAOV - prevAOV;
-        updateChangeElement('aovChange', aovChange, 'vs LY');
-        document.getElementById('aovPrev').textContent = `LY: ${formatCurrency(prevAOV)}`;
-    } else if (currentChannelFilter === 'wholesale') {
-        const totalWholesaleRev = data.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
-        const orders = data.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
-        const periodAOV = orders > 0 ? totalWholesaleRev / orders : 0;
-        const prevWholesaleRev = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_revenue || 0), 0);
-        const prevOrders = prevPeriodData.reduce((sum, d) => sum + (d.wholesale_orders || 0), 0);
-        const prevAOV = prevOrders > 0 ? prevWholesaleRev / prevOrders : 0;
-        document.getElementById('avgOrderValue').textContent = formatCurrency(periodAOV);
-        const aovChange = periodAOV - prevAOV;
-        updateChangeElement('aovChange', aovChange, 'vs LY');
-        document.getElementById('aovPrev').textContent = `LY: ${formatCurrency(prevAOV)}`;
-    } else {
-        const totalBonsaiRev = data.reduce((sum, d) => sum + (d.bonsai_revenue || 0), 0);
-        const orders = data.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
-        const periodAOV = orders > 0 ? totalBonsaiRev / orders : 0;
-
-        const prevBonsaiRev = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_revenue || 0), 0);
-        const prevOrders = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
-        const prevAOV = prevOrders > 0 ? prevBonsaiRev / prevOrders : 0;
-
-        document.getElementById('avgOrderValue').textContent = formatCurrency(periodAOV);
-        const aovChange = periodAOV - prevAOV;
-        updateChangeElement('aovChange', aovChange, 'vs LY');
-        document.getElementById('aovPrev').textContent = `LY: ${formatCurrency(prevAOV)}`;
-    }
-
-    // Amazon Margin
-    if (currentChannelFilter === 'bonsai') {
-        document.getElementById('amazonMargin').textContent = 'N/A';
-        updateChangeElement('marginChange', 0);
-        document.getElementById('marginPrev').textContent = '';
-    } else {
-        totalAmazonNet = data.reduce((sum, d) => sum + (d.amazon_net_proceeds || 0), 0);
-        const totalSales = data.reduce((sum, d) => sum + (d.amazon_revenue || 0), 0);
-        const periodMargin = totalSales > 0 ? (totalAmazonNet / totalSales) * 100 : 0;
-
-        prevTotalAmazonNet = prevPeriodData.reduce((sum, d) => sum + (d.amazon_net_proceeds || 0), 0);
-        const prevTotalSales = prevPeriodData.reduce((sum, d) => sum + (d.amazon_revenue || 0), 0);
-        const prevMargin = prevTotalSales > 0 ? (prevTotalAmazonNet / prevTotalSales) * 100 : 0;
-
-        document.getElementById('amazonMargin').textContent = formatPercent(periodMargin);
-        const marginChange = periodMargin - prevMargin;
-        updateChangeElement('marginChange', marginChange, 'pp LY');
-        document.getElementById('marginPrev').textContent = `LY: ${formatPercent(prevMargin)}`;
-    }
-
-    // Amazon Net Proceeds
-    if (currentChannelFilter === 'bonsai') {
-        document.getElementById('amazonNetProceeds').textContent = 'N/A';
-        updateChangeElement('netProceedsChange', 0);
-        document.getElementById('netProceedsPrev').textContent = '';
-    } else {
-        totalAmazonNet = data.reduce((sum, d) => sum + (d.amazon_net_proceeds || 0), 0);
-        prevTotalAmazonNet = prevPeriodData.reduce((sum, d) => sum + (d.amazon_net_proceeds || 0), 0);
-
-        document.getElementById('amazonNetProceeds').textContent = formatCurrency(totalAmazonNet);
-        const netChange = totalAmazonNet - prevTotalAmazonNet;
-        updateChangeElement('netProceedsChange', netChange, 'vs LY');
-        document.getElementById('netProceedsPrev').textContent = `LY: ${formatCurrency(prevTotalAmazonNet)}`;
-    }
-
-    // Customers
-    if (currentChannelFilter === 'amazon') {
-        document.getElementById('customers').textContent = 'N/A';
-        updateChangeElement('customersChange', 0);
-        document.getElementById('customersPrev').textContent = '';
-
-        document.getElementById('newCustomers').textContent = 'N/A';
-        updateChangeElement('newCustomersChange', 0);
-        document.getElementById('newCustomersPrev').textContent = '';
-
-        document.getElementById('returningCustomers').textContent = 'N/A';
-        updateChangeElement('returningCustomersChange', 0);
-        document.getElementById('returningCustomersPrev').textContent = '';
-    } else {
-        const totalBonsaiCustomers = data.reduce((sum, d) => sum + (d.bonsai_customers || 0), 0);
-        const prevTotalBonsaiCustomers = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_customers || 0), 0);
-        document.getElementById('customers').textContent = formatNumber(totalBonsaiCustomers);
-        const custChange = totalBonsaiCustomers - prevTotalBonsaiCustomers;
-        updateChangeElement('customersChange', custChange, 'vs LY');
-        document.getElementById('customersPrev').textContent = `LY: ${formatNumber(prevTotalBonsaiCustomers)}`;
-
-        const totalNew = data.reduce((sum, d) => sum + (d.bonsai_new_customers || 0), 0);
-        const prevNew = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_new_customers || 0), 0);
-        document.getElementById('newCustomers').textContent = formatNumber(totalNew);
-        updateChangeElement('newCustomersChange', totalNew - prevNew, 'vs LY');
-        document.getElementById('newCustomersPrev').textContent = `LY: ${formatNumber(prevNew)}`;
-
-        const totalReturning = data.reduce((sum, d) => sum + (d.bonsai_returning_customers || 0), 0);
-        const prevReturning = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_returning_customers || 0), 0);
-        document.getElementById('returningCustomers').textContent = formatNumber(totalReturning);
-        updateChangeElement('returningCustomersChange', totalReturning - prevReturning, 'vs LY');
-        document.getElementById('returningCustomersPrev').textContent = `LY: ${formatNumber(prevReturning)}`;
-    }
-
-    // Bonsai Users (from GA4)
-    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
-        document.getElementById('bonsaiUsers').textContent = 'N/A';
-        updateChangeElement('bonsaiUsersChange', 0);
-        document.getElementById('bonsaiUsersPrev').textContent = '';
-    } else {
-        const totalBonsaiUsers = data.reduce((sum, d) => sum + (d.bonsai_users || 0), 0);
-        const prevBonsaiUsers = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_users || 0), 0);
-        document.getElementById('bonsaiUsers').textContent = formatNumber(totalBonsaiUsers);
-        const userChange = totalBonsaiUsers - prevBonsaiUsers;
-        updateChangeElement('bonsaiUsersChange', userChange, 'vs LY');
-        document.getElementById('bonsaiUsersPrev').textContent = `LY: ${formatNumber(prevBonsaiUsers)}`;
-    }
-
-    // Bonsai Sessions (from GA4)
-    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
-        document.getElementById('bonsaiSessions').textContent = 'N/A';
-        updateChangeElement('bonsaiSessionsChange', 0);
-        document.getElementById('bonsaiSessionsPrev').textContent = '';
-    } else {
-        const totalBonsaiSessions = data.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
-        const prevBonsaiSessions = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
-        document.getElementById('bonsaiSessions').textContent = formatNumber(totalBonsaiSessions);
-        const sessionChange = totalBonsaiSessions - prevBonsaiSessions;
-        updateChangeElement('bonsaiSessionsChange', sessionChange, 'vs LY');
-        document.getElementById('bonsaiSessionsPrev').textContent = `LY: ${formatNumber(prevBonsaiSessions)}`;
-    }
-
-    // Bonsai Conv Rate (from GA4)
-    if (currentChannelFilter === 'amazon' || currentChannelFilter === 'wholesale') {
-        document.getElementById('bonsaiConvRate').textContent = 'N/A';
-        updateChangeElement('bonsaiCvrChange', 0);
-        document.getElementById('bonsaiCvrPrev').textContent = '';
-    } else {
-        const totalOrders = data.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
-        const totalSessions = data.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
-        const periodCVR = totalSessions > 0 ? (totalOrders / totalSessions) * 100 : 0;
-
-        const prevOrders = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_orders || 0), 0);
-        const prevSessions = prevPeriodData.reduce((sum, d) => sum + (d.bonsai_sessions || 0), 0);
-        const prevCVR = prevSessions > 0 ? (prevOrders / prevSessions) * 100 : 0;
-
-        document.getElementById('bonsaiConvRate').textContent = formatPercent(periodCVR);
-        const cvrChange = periodCVR - prevCVR;
-        updateChangeElement('bonsaiCvrChange', cvrChange, 'pp LY');
-        document.getElementById('bonsaiCvrPrev').textContent = `LY: ${formatPercent(prevCVR)}`;
+    try {
+        const response = await fetch(`${TOP_SKU_URL}?${params.toString()}`);
+        const result = await response.json();
+        if (!result.success) {
+            throw new Error(result.error || 'Failed to fetch top SKU');
+        }
+        if (topSkuRequestKey !== requestKey) return;
+        topSkuData = result.top_sku || null;
+        topSkuCache.set(requestKey, topSkuData);
+        renderDrivers(latestMetrics, topSkuData);
+    } catch (error) {
+        console.error('Error loading top SKU:', error);
+        if (topSkuRequestKey === requestKey) {
+            topSkuData = null;
+            renderDrivers(latestMetrics, topSkuData);
+        }
     }
 }
 
-// Update charts with defensive error handling
-function updateCharts(data) {
-    if (!data || data.length === 0) return;
-    const reversedData = [...data].reverse();
+function getWeekRange(data) {
+    if (!data || !data.length) return null;
+    const sorted = sortByDateDesc(data);
+    const latest = sorted[0];
+    const earliest = sorted[sorted.length - 1];
+    const start = earliest.week_start;
+    const end = addDays(latest.week_start, 6);
+    return { start, end };
+}
 
-    // Run each chart update in its own try-catch so one failure doesn't kill the dashboard
-    const runUpdate = (name, fn, args) => {
-        try {
-            fn(args);
-        } catch (err) {
-            console.error(`Error updating ${name}:`, err);
+function addDays(dateString, days) {
+    const date = new Date(`${dateString}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+}
+
+function filterDataByRange(data, state) {
+    const sorted = sortByDateDesc(data);
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth();
+
+    switch (state.dateRange) {
+        case 'today':
+            return sorted.slice(0, 1);
+        case 'last7':
+            return sorted.slice(0, 1);
+        case 'last30':
+            return sorted.slice(0, 4);
+        case 'mtd':
+            return sorted.filter(item => {
+                const date = new Date(item.week_start + 'T00:00:00Z');
+                return date.getUTCFullYear() === currentYear && date.getUTCMonth() === currentMonth;
+            });
+        case 'qtd': {
+            const currentQuarter = Math.floor(currentMonth / 3);
+            return sorted.filter(item => {
+                const date = new Date(item.week_start + 'T00:00:00Z');
+                return date.getUTCFullYear() === currentYear && Math.floor(date.getUTCMonth() / 3) === currentQuarter;
+            });
+        }
+        case 'custom': {
+            if (!state.customRange.start || !state.customRange.end) return sorted.slice(0, 4);
+            const start = new Date(state.customRange.start);
+            const end = new Date(state.customRange.end);
+            return sorted.filter(item => {
+                const date = new Date(item.week_start + 'T00:00:00Z');
+                return date >= start && date <= end;
+            });
+        }
+        case 'ytd':
+        default:
+            return sorted.filter(item => Number(item.year) === currentYear);
+    }
+}
+
+function getComparisonData(selectedData, allData, state) {
+    if (!selectedData.length) return [];
+
+    if (state.comparisonMode === 'prior-year') {
+        return selectedData.map(item => findPriorYearWeek(allData, item.week_start)).filter(Boolean);
+    }
+
+    const sorted = sortByDateDesc(allData);
+    const oldestSelected = selectedData[selectedData.length - 1];
+    const oldestIndex = sorted.findIndex(item => item.week_start === oldestSelected.week_start);
+    if (oldestIndex === -1) return [];
+    return sorted.slice(oldestIndex + 1, oldestIndex + 1 + selectedData.length);
+}
+
+function findPriorYearWeek(data, weekStart) {
+    const currentWeekDate = new Date(weekStart + 'T00:00:00Z');
+    const targetDate = new Date(currentWeekDate);
+    targetDate.setUTCDate(targetDate.getUTCDate() - 364);
+    return data.find(item => {
+        const itemDate = new Date(item.week_start + 'T00:00:00Z');
+        return Math.abs(itemDate - targetDate) <= 3 * 24 * 60 * 60 * 1000;
+    });
+}
+
+function sortByDateDesc(data) {
+    return [...data].sort((a, b) => new Date(b.week_start) - new Date(a.week_start));
+}
+
+function computeMetrics(currentData, previousData, state) {
+    const currentTotals = computeTotals(currentData);
+    const previousTotals = computeTotals(previousData);
+    const selected = computeSelectedMetrics(currentTotals, state.channel);
+    const selectedPrev = computeSelectedMetrics(previousTotals, state.channel);
+
+    return {
+        currentTotals,
+        previousTotals,
+        selected,
+        selectedPrev,
+        comparisonLabel: state.comparisonMode === 'prior-year' ? 'vs prior year' : 'vs prior period'
+    };
+}
+
+function computeTotals(data) {
+    const bonsaiRevenue = sum(data, 'bonsai_revenue');
+    const amazonRevenue = sum(data, 'amazon_revenue');
+    const wholesaleRevenue = sum(data, 'wholesale_revenue');
+    const amazonNet = sum(data, 'amazon_net_proceeds');
+
+    const bonsaiOrders = sum(data, 'bonsai_orders');
+    const amazonOrders = sum(data, 'amazon_orders');
+    const wholesaleOrders = sum(data, 'wholesale_orders');
+    const totalOrders = bonsaiOrders + amazonOrders + wholesaleOrders;
+
+    const totalRevenue = sum(data, 'total_company_revenue');
+    const estimatedProfit = sum(data, 'estimated_company_profit');
+
+    const bonsaiSessions = sum(data, 'bonsai_sessions');
+    const amazonSessions = sum(data, 'amazon_sessions');
+
+    return {
+        bonsaiRevenue,
+        amazonRevenue,
+        wholesaleRevenue,
+        amazonNet,
+        bonsaiOrders,
+        amazonOrders,
+        wholesaleOrders,
+        totalOrders,
+        totalRevenue,
+        estimatedProfit,
+        amazonUnits: sum(data, 'amazon_units'),
+        bonsaiSessions,
+        amazonSessions,
+        bonsaiCvr: bonsaiSessions > 0 ? (bonsaiOrders / bonsaiSessions) * 100 : 0,
+        amazonCvr: amazonSessions > 0 ? (amazonOrders / amazonSessions) * 100 : 0,
+        aov: totalOrders > 0 ? totalRevenue / totalOrders : 0,
+        contributionMargin: totalRevenue > 0 ? (estimatedProfit / totalRevenue) * 100 : 0,
+        channels: {
+            bonsai: {
+                name: 'Online Storefront',
+                revenue: bonsaiRevenue,
+                orders: bonsaiOrders,
+                profit: null,
+                gmPct: null
+            },
+            amazon: {
+                name: 'Amazon',
+                revenue: amazonRevenue,
+                orders: amazonOrders,
+                profit: amazonNet,
+                gmPct: amazonRevenue > 0 ? (amazonNet / amazonRevenue) * 100 : null
+            },
+            wholesale: {
+                name: 'Wholesale',
+                revenue: wholesaleRevenue,
+                orders: wholesaleOrders,
+                profit: null,
+                gmPct: null
+            }
         }
     };
+}
 
-    runUpdate('Revenue Trend', updateRevenueTrendChart, reversedData);
-
-    if (currentChannelFilter === 'all') {
-        runUpdate('Channel Mix', updateChannelMixChart, reversedData);
-    } else {
-        if (charts.channelMix) charts.channelMix.destroy();
-    }
-
-    runUpdate('WoW Trend', updateWowTrendChart, reversedData);
-    runUpdate('YoY Trend', updateYoyTrendChart, reversedData);
-    runUpdate('YoY Comparison', updateYoyComparisonChart, data);
-
-    if (currentChannelFilter === 'bonsai') {
-        runUpdate('Bonsai Customer Breakdown', updateCustomerTypeTrendChart, reversedData);
-    } else {
-        if (charts.customerTypeTrend) charts.customerTypeTrend.destroy();
-    }
-
-    if (currentChannelFilter === 'google_analytics') {
-        runUpdate('GA Traffic Trend', updateGATrafficChart, reversedData);
-    } else {
-        if (charts.gaTrafficTrend) charts.gaTrafficTrend.destroy();
+function computeSelectedMetrics(totals, channel) {
+    switch (channel) {
+        case 'amazon':
+            return {
+                net_revenue: totals.amazonRevenue,
+                gross_profit: totals.amazonNet,
+                contribution_margin: totals.amazonRevenue > 0 ? (totals.amazonNet / totals.amazonRevenue) * 100 : null,
+                orders: totals.amazonOrders,
+                aov: totals.amazonOrders > 0 ? totals.amazonRevenue / totals.amazonOrders : 0,
+                units: totals.amazonUnits
+            };
+        case 'bonsai':
+            return {
+                net_revenue: totals.bonsaiRevenue,
+                gross_profit: null,
+                contribution_margin: null,
+                orders: totals.bonsaiOrders,
+                aov: totals.bonsaiOrders > 0 ? totals.bonsaiRevenue / totals.bonsaiOrders : 0,
+                units: null
+            };
+        case 'wholesale':
+            return {
+                net_revenue: totals.wholesaleRevenue,
+                gross_profit: null,
+                contribution_margin: null,
+                orders: totals.wholesaleOrders,
+                aov: totals.wholesaleOrders > 0 ? totals.wholesaleRevenue / totals.wholesaleOrders : 0,
+                units: null
+            };
+        case 'retail':
+            return {
+                net_revenue: null,
+                gross_profit: null,
+                contribution_margin: null,
+                orders: null,
+                aov: null,
+                units: null
+            };
+        case 'all':
+        default:
+            return {
+                net_revenue: totals.totalRevenue,
+                gross_profit: totals.estimatedProfit,
+                contribution_margin: totals.contributionMargin,
+                orders: totals.totalOrders,
+                aov: totals.aov,
+                units: totals.amazonUnits
+            };
     }
 }
 
-// Revenue Trend Chart
-function updateRevenueTrendChart(data) {
-    const ctx = document.getElementById('revenueTrendChart');
+function renderKpis(metrics, state) {
+    Object.keys(KPI_CONFIG).forEach(key => {
+        const config = KPI_CONFIG[key];
+        const valueEl = document.getElementById(config.valueId);
+        const metaEl = document.getElementById(config.metaId);
+        const currentValue = metrics.selected[key];
+        const previousValue = metrics.selectedPrev[key];
 
-    if (charts.revenueTrend) {
-        charts.revenueTrend.destroy();
-    }
+        if (config.placeholder) {
+            valueEl.textContent = config.placeholder;
+            metaEl.textContent = '--';
+            metaEl.className = 'kpi-meta';
+            return;
+        }
 
-    let datasets = [];
+        if (currentValue === null || currentValue === undefined) {
+            valueEl.textContent = 'N/A';
+            metaEl.textContent = '--';
+            metaEl.className = 'kpi-meta';
+            return;
+        }
 
-    if (currentChannelFilter === 'all') {
-        datasets = [
-            {
-                label: 'Total Revenue',
-                data: data.map(d => d.total_company_revenue || 0),
-                borderColor: '#6366f1',
-                backgroundColor: 'rgba(99, 102, 241, 0.1)',
-                tension: 0.4,
-                fill: true
-            },
-            {
-                label: 'Bonsai Revenue',
-                data: data.map(d => d.bonsai_revenue || 0),
-                borderColor: '#10b981',
-                backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                tension: 0.4,
-                fill: true
-            },
-            {
-                label: 'Amazon Revenue',
-                data: data.map(d => d.amazon_revenue || 0),
-                borderColor: '#f59e0b',
-                backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                tension: 0.4,
-                fill: true
-            },
-            {
-                label: 'Wholesale Revenue',
-                data: data.map(d => d.wholesale_revenue || 0),
-                borderColor: '#8b5cf6',
-                backgroundColor: 'rgba(139, 92, 246, 0.1)',
-                tension: 0.4,
-                fill: true
-            }
-        ];
-    } else if (currentChannelFilter === 'amazon') {
-        datasets = [
-            {
-                label: 'Amazon Revenue',
-                data: data.map(d => d.amazon_revenue || 0),
-                borderColor: '#f59e0b',
-                backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                tension: 0.4,
-                fill: true
-            }
-        ];
-    } else if (currentChannelFilter === 'wholesale') {
-        datasets = [
-            {
-                label: 'Wholesale Revenue',
-                data: data.map(d => d.wholesale_revenue || 0),
-                borderColor: '#8b5cf6',
-                backgroundColor: 'rgba(139, 92, 246, 0.1)',
-                tension: 0.4,
-                fill: true
-            }
-        ];
-    } else {
-        datasets = [
-            {
-                label: 'Bonsai Revenue',
-                data: data.map(d => d.bonsai_revenue || 0),
-                borderColor: '#10b981',
-                backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                tension: 0.4,
-                fill: true
-            }
-        ];
-    }
+        valueEl.textContent = formatValue(currentValue, config.format);
 
-    charts.revenueTrend = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: data.map(d => formatDate(d.week_start)),
-            datasets: datasets
-        },
-        options: getChartOptions('Revenue ($)')
+        const delta = (currentValue || 0) - (previousValue || 0);
+        const deltaText = formatDelta(delta, config);
+        metaEl.textContent = `${deltaText} ${metrics.comparisonLabel}`;
+        metaEl.className = `kpi-meta ${delta > 0 ? 'positive' : delta < 0 ? 'negative' : ''}`;
     });
 }
 
-// Channel Mix Chart
-function updateChannelMixChart(data) {
-    const ctx = document.getElementById('channelMixChart');
+function renderChannelMixChart(data, state) {
+    const ctx = document.getElementById('channelMixTrendChart');
+    if (!ctx) return;
+    if (charts.channelMix) charts.channelMix.destroy();
 
-    if (charts.channelMix) {
-        charts.channelMix.destroy();
+    const labels = [...data].reverse().map(item => formatDate(item.week_start));
+    const datasets = [];
+
+    if (state.channel === 'all') {
+        datasets.push(makeLineDataset('Online Storefront', data, 'bonsai_revenue', '#22c55e', 0));
+        datasets.push(makeLineDataset('Amazon', data, 'amazon_revenue', '#f59e0b', 1));
+        datasets.push(makeLineDataset('Wholesale', data, 'wholesale_revenue', '#8b5cf6', 2));
+    } else {
+        const mapping = {
+            bonsai: { label: 'Online Storefront', key: 'bonsai_revenue', color: '#22c55e' },
+            amazon: { label: 'Amazon', key: 'amazon_revenue', color: '#f59e0b' },
+            wholesale: { label: 'Wholesale', key: 'wholesale_revenue', color: '#8b5cf6' }
+        };
+        const config = mapping[state.channel];
+        if (config) {
+            datasets.push(makeLineDataset(config.label, data, config.key, config.color, 0));
+        }
     }
 
     charts.channelMix = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: data.map(d => formatDate(d.week_start)),
-            datasets: [
-                {
-                    label: 'Bonsai',
-                    data: data.map(d => d.bonsai_revenue || 0),
-                    backgroundColor: '#10b981'
-                },
-                {
-                    label: 'Amazon',
-                    data: data.map(d => d.amazon_revenue || 0),
-                    backgroundColor: '#f59e0b'
-                },
-                {
-                    label: 'Wholesale',
-                    data: data.map(d => d.wholesale_revenue || 0),
-                    backgroundColor: '#8b5cf6'
-                }
-            ]
-        },
-        options: {
-            ...getChartOptions('Revenue ($)'),
-            scales: {
-                ...getChartOptions('Revenue ($)').scales,
-                x: { ...getChartOptions('Revenue ($)').scales.x, stacked: true },
-                y: { ...getChartOptions('Revenue ($)').scales.y, stacked: true }
-            }
-        }
-    });
-}
-
-// WoW Trend Chart (compares each week to the previous week)
-function updateWowTrendChart(data) {
-    const ctx = document.getElementById('wowTrendChart');
-
-    if (charts.wowTrend) {
-        charts.wowTrend.destroy();
-    }
-
-    const wowData = data.map((d) => {
-        // Find previous week in the full dashboardData
-        const currentIndex = dashboardData.findIndex(w => w.week_start === d.week_start);
-        const prevWeek = dashboardData[currentIndex + 1]; // dashboardData is newest to oldest
-
-        if (!prevWeek) return 0;
-
-        const currentRev = (currentChannelFilter === 'amazon') ? (d.amazon_revenue || 0) :
-            (currentChannelFilter === 'bonsai') ? (d.bonsai_revenue || 0) :
-                (currentChannelFilter === 'wholesale') ? (d.wholesale_revenue || 0) :
-                    (d.total_company_revenue || 0);
-
-        const prevRev = (currentChannelFilter === 'amazon') ? (prevWeek.amazon_revenue || 0) :
-            (currentChannelFilter === 'bonsai') ? (prevWeek.bonsai_revenue || 0) :
-                (currentChannelFilter === 'wholesale') ? (prevWeek.wholesale_revenue || 0) :
-                    (prevWeek.total_company_revenue || 0);
-
-        return calculatePercentChange(currentRev, prevRev);
-    });
-
-    charts.wowTrend = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: data.map(d => formatDate(d.week_start)),
-            datasets: [{
-                label: 'WoW Growth (%)',
-                data: wowData,
-                borderColor: '#6366f1',
-                backgroundColor: 'rgba(99, 102, 241, 0.1)',
-                tension: 0.4,
-                fill: true
-            }]
+            labels,
+            datasets
         },
-        options: getChartOptions('Growth (%)')
+        options: getChartOptions('Revenue ($)', true)
     });
 }
 
-// YoY Trend Chart (compares each week to the same week last year)
-function updateYoyTrendChart(data) {
-    const ctx = document.getElementById('yoyTrendChart');
-
-    if (charts.yoyTrend) {
-        charts.yoyTrend.destroy();
-    }
-
-    const yoyData = data.map((d) => {
-        // Find the same week from last year (364 days ago)
-        const currentWeekDate = new Date(d.week_start + 'T00:00:00Z');
-        const targetDate = new Date(currentWeekDate);
-        targetDate.setUTCDate(targetDate.getUTCDate() - 364);
-        const targetStr = targetDate.toISOString().split('T')[0];
-
-        const lastYearWeek = dashboardData.find(w => w.week_start === targetStr);
-        if (!lastYearWeek) return 0;
-
-        let current, previous;
-        if (currentChannelFilter === 'amazon') {
-            current = d.amazon_revenue || 0;
-            previous = lastYearWeek.amazon_revenue || 0;
-        } else if (currentChannelFilter === 'bonsai') {
-            current = d.bonsai_revenue || 0;
-            previous = lastYearWeek.bonsai_revenue || 0;
-        } else if (currentChannelFilter === 'wholesale') {
-            current = d.wholesale_revenue || 0;
-            previous = lastYearWeek.wholesale_revenue || 0;
-        } else {
-            current = d.total_company_revenue || 0;
-            previous = lastYearWeek.total_company_revenue || 0;
-        }
-
-        return calculatePercentChange(current, previous);
-    });
-
-    charts.yoyTrend = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: data.map(d => formatDate(d.week_start)),
-            datasets: [{
-                label: 'YoY Growth (%)',
-                data: yoyData,
-                borderColor: '#10b981',
-                backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                tension: 0.4,
-                fill: true
-            }]
-        },
-        options: getChartOptions('Growth (%)')
-    });
-}
-
-// YoY Comparison Chart - Should show full year progress comparison
-function updateYoyComparisonChart(data) {
-    const ctx = document.getElementById('yoyComparisonChart');
-
-    if (charts.yoyComparison) {
-        charts.yoyComparison.destroy();
-    }
-
-    // Always fetch full year data from dashboardData for this specific chart
-    const data2025 = dashboardData.filter(d => d.year === 2025).reverse();
-    const data2026 = dashboardData.filter(d => d.year === 2026).reverse();
-
-    if (data2026.length === 0) return;
-
-    let data2025Values, data2026Values;
-
-    if (currentChannelFilter === 'amazon') {
-        data2025Values = data2025.map(d => d.amazon_revenue || 0);
-        data2026Values = data2026.map(d => d.amazon_revenue || 0);
-    } else if (currentChannelFilter === 'bonsai') {
-        data2025Values = data2025.map(d => d.bonsai_revenue || 0);
-        data2026Values = data2026.map(d => d.bonsai_revenue || 0);
-    } else {
-        data2025Values = data2025.map(d => d.total_company_revenue || 0);
-        data2026Values = data2026.map(d => d.total_company_revenue || 0);
-    }
-
-    charts.yoyComparison = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: data2026.map(d => formatDate(d.week_start)), // Use real dates instead of "Week X"
-            datasets: [
-                {
-                    label: '2025 Revenue',
-                    data: data2025Values.slice(0, data2026Values.length), // Align length
-                    backgroundColor: 'rgba(99, 102, 241, 0.5)',
-                    borderColor: '#6366f1',
-                    borderWidth: 1
-                },
-                {
-                    label: '2026 Revenue',
-                    data: data2026Values,
-                    backgroundColor: '#8b5cf6',
-                    borderColor: '#8b5cf6',
-                    borderWidth: 1
-                }
-            ]
-        },
-        options: getChartOptions('Revenue ($)')
-    });
-}
-
-// New vs Returning Customer Trend (Bonsai Only)
-function updateCustomerTypeTrendChart(data) {
-    const ctx = document.getElementById('customerTypeTrendChart');
-
-    if (charts.customerTypeTrend) {
-        charts.customerTypeTrend.destroy();
-    }
-
-    charts.customerTypeTrend = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: data.map(d => formatDate(d.week_start)),
-            datasets: [
-                {
-                    label: 'New Customers',
-                    data: data.map(d => d.bonsai_new_customers || 0),
-                    backgroundColor: '#10b981'
-                },
-                {
-                    label: 'Returning Customers',
-                    data: data.map(d => d.bonsai_returning_customers || 0),
-                    backgroundColor: '#3b82f6'
-                }
-            ]
-        },
-        options: {
-            ...getChartOptions('Customers'),
-            scales: {
-                ...getChartOptions('Customers').scales,
-                x: { ...getChartOptions('Customers').scales.x, stacked: true },
-                y: { ...getChartOptions('Customers').scales.y, stacked: true }
-            }
-        }
-    });
-}
-
-// GA Traffic Trend Chart
-function updateGATrafficChart(data) {
-    const ctx = document.getElementById('gaTrafficTrendChart');
-
-    if (charts.gaTrafficTrend) {
-        charts.gaTrafficTrend.destroy();
-    }
-
-    charts.gaTrafficTrend = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: data.map(d => formatDate(d.week_start)),
-            datasets: [
-                {
-                    label: 'Sessions',
-                    data: data.map(d => d.bonsai_sessions || 0),
-                    borderColor: '#10b981',
-                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                    tension: 0.4,
-                    fill: true
-                },
-                {
-                    label: 'Users',
-                    data: data.map(d => d.bonsai_users || 0),
-                    borderColor: '#6366f1',
-                    backgroundColor: 'rgba(99, 102, 241, 0.1)',
-                    tension: 0.4,
-                    fill: true
-                }
-            ]
-        },
-        options: getChartOptions('Count')
-    });
-}
-
-// Chart options template
-function getChartOptions(yAxisLabel) {
+function makeLineDataset(label, data, key, color, stack) {
     return {
-        responsive: true,
-        maintainAspectRatio: true,
-        plugins: {
-            legend: {
-                labels: {
-                    color: '#a0aec0',
-                    font: { size: 12 }
-                }
-            },
-            tooltip: {
-                backgroundColor: '#1a2332',
-                titleColor: '#ffffff',
-                bodyColor: '#a0aec0',
-                borderColor: '#2d3748',
-                borderWidth: 1
-            }
-        },
-        scales: {
-            x: {
-                grid: { color: '#2d3748' },
-                ticks: { color: '#a0aec0', font: { size: 11 } }
-            },
-            y: {
-                grid: { color: '#2d3748' },
-                ticks: { color: '#a0aec0', font: { size: 11 } },
-                title: {
-                    display: true,
-                    text: yAxisLabel,
-                    color: '#a0aec0'
-                }
-            }
-        }
+        label,
+        data: [...data].reverse().map(item => item[key] || 0),
+        borderColor: color,
+        backgroundColor: hexToRgba(color, 0.2),
+        tension: 0.35,
+        fill: true,
+        stack
     };
 }
 
-// Helper functions
-function calculateChange(current, previous) {
-    return current - previous;
+function renderWaterfallChart(metrics) {
+    const ctx = document.getElementById('revenueWaterfallChart');
+    if (!ctx) return;
+    if (charts.waterfall) charts.waterfall.destroy();
+
+    const current = metrics.selected;
+    const previous = metrics.selectedPrev;
+
+    const ordersDelta = (current.orders || 0) - (previous.orders || 0);
+    const prevAov = previous.orders ? (previous.net_revenue || 0) / previous.orders : 0;
+    const currentAov = current.orders ? (current.net_revenue || 0) / current.orders : 0;
+    const volumeEffect = ordersDelta * prevAov;
+    const priceEffect = (currentAov - prevAov) * (previous.orders || 0);
+    const totalDelta = (current.net_revenue || 0) - (previous.net_revenue || 0);
+    const mixEffect = totalDelta - volumeEffect - priceEffect;
+
+    const values = [volumeEffect, priceEffect, mixEffect, totalDelta];
+    const labels = ['Volume', 'Price/AOV', 'Mix', 'Total Change'];
+    const colors = values.map(value => value >= 0 ? '#22c55e' : '#ef4444');
+    colors[3] = '#22d3ee';
+
+    charts.waterfall = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{
+                label: 'Revenue Change',
+                data: values,
+                backgroundColor: colors
+            }]
+        },
+        options: getChartOptions('Change in Revenue ($)', false)
+    });
 }
 
-function calculatePercentChange(current, previous) {
-    if (previous === 0) return 0;
-    return ((current - previous) / previous) * 100;
+function renderDecompositionChart(metrics) {
+    const ctx = document.getElementById('decompositionChart');
+    if (!ctx) return;
+    if (charts.decomposition) charts.decomposition.destroy();
+
+    const revenueDelta = (metrics.selected.net_revenue || 0) - (metrics.selectedPrev.net_revenue || 0);
+    const profitDelta = (metrics.selected.gross_profit || 0) - (metrics.selectedPrev.gross_profit || 0);
+
+    charts.decomposition = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['Delta Revenue', 'Delta Gross Profit'],
+            datasets: [{
+                label: 'Change',
+                data: [revenueDelta, profitDelta],
+                backgroundColor: ['#f59e0b', '#8b5cf6']
+            }]
+        },
+        options: getChartOptions('Change ($)', false)
+    });
 }
 
-function updateChangeElement(elementId, value, suffix = '') {
-    const element = document.getElementById(elementId);
-    const absValue = Math.abs(value);
-    const sign = value >= 0 ? '+' : '-';
-    const className = value > 0 ? 'positive' : value < 0 ? 'negative' : 'neutral';
+function renderChannelEfficiencyTable(metrics) {
+    const tbody = document.getElementById('channelEfficiencyBody');
+    tbody.innerHTML = '';
 
-    element.className = `kpi-change ${className}`;
+    const channels = Object.values(metrics.currentTotals.channels);
+    channels.forEach(channel => {
+        const key = channel.name === 'Online Storefront' ? 'bonsai' : channel.name.toLowerCase();
+        const prevChannel = metrics.previousTotals.channels[key];
+        const revenueChange = channel.revenue - (prevChannel ? prevChannel.revenue : 0);
+        const orderShare = metrics.currentTotals.totalOrders > 0
+            ? (channel.orders / metrics.currentTotals.totalOrders) * 100
+            : 0;
 
-    if (suffix === 'WoW' || suffix === 'YoY') {
-        element.textContent = suffix;
-    } else if (suffix === 'pp') {
-        element.textContent = `${sign}${absValue.toFixed(2)}pp`;
-    } else {
-        element.textContent = `${sign}${formatNumber(absValue)}`;
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${channel.name}</td>
+            <td>${formatCurrency(channel.revenue)}</td>
+            <td>${channel.gmPct === null ? 'N/A' : formatPercent(channel.gmPct)}</td>
+            <td>${formatPercent(orderShare)}</td>
+            <td>${formatSignedCurrency(revenueChange)}</td>
+            <td>Not Connected</td>
+            <td>Not Connected</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderDrivers(metrics, topSku) {
+    const hasTopSku = topSku && topSku.sku;
+    const topSkuDriver = hasTopSku
+        ? makeTopSkuDriver(topSku)
+        : makePlaceholderDriver(topSku ? 'Top SKU (No data)' : 'Top SKU (Not Connected)');
+
+    const drivers = [
+        makeDriver('Amazon', metrics.currentTotals.channels.amazon.revenue, metrics.previousTotals.channels.amazon.revenue),
+        makeDriver('Online Storefront', metrics.currentTotals.channels.bonsai.revenue, metrics.previousTotals.channels.bonsai.revenue),
+        makeDriver('Wholesale', metrics.currentTotals.channels.wholesale.revenue, metrics.previousTotals.channels.wholesale.revenue),
+        topSkuDriver,
+        makePlaceholderDriver('Top Category (Not Connected)')
+    ];
+
+    const positive = drivers.filter(d => d.delta >= 0).sort((a, b) => b.delta - a.delta).slice(0, 5);
+    const negative = drivers.filter(d => d.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 5);
+
+    fillDriverSlots(positive, 'No additional positive drivers');
+    fillDriverSlots(negative, 'No additional negative drivers');
+
+    renderDriverList('positiveDrivers', positive);
+    renderDriverList('negativeDrivers', negative);
+}
+
+function makeDriver(label, current, previous) {
+    return {
+        label,
+        delta: current - (previous || 0),
+        metric: 'net_revenue'
+    };
+}
+
+function makeTopSkuDriver(topSku) {
+    const labelValue = topSku.name || topSku.sku;
+    return {
+        label: `Top SKU: ${labelValue}`,
+        delta: (topSku.current_revenue || 0) - (topSku.previous_revenue || 0),
+        metric: 'net_revenue'
+    };
+}
+
+function makePlaceholderDriver(label, valueLabel = 'Not Connected') {
+    return {
+        label,
+        delta: 0,
+        metric: 'net_revenue',
+        placeholder: true,
+        placeholderValue: valueLabel
+    };
+}
+
+function fillDriverSlots(list, label) {
+    while (list.length < 5) {
+        list.push(makePlaceholderDriver(label, '--'));
     }
+}
+
+function renderDriverList(id, drivers) {
+    const container = document.getElementById(id);
+    container.innerHTML = '';
+
+    drivers.forEach(driver => {
+        const item = document.createElement('li');
+        item.className = 'driver-item';
+        item.dataset.metric = driver.metric;
+        item.innerHTML = `
+            <div>${driver.label}</div>
+            <div class="driver-value">${driver.placeholder ? driver.placeholderValue : formatCurrency(driver.delta)}</div>
+        `;
+        container.appendChild(item);
+    });
+}
+
+function renderAlerts(metrics) {
+    currentAlerts = [];
+
+    const amazonDrop = metrics.currentTotals.amazonCvr - metrics.previousTotals.amazonCvr;
+    if (amazonDrop <= -2) {
+        currentAlerts.push({
+            title: 'Amazon CVR down 2pp+ (vs comparison)',
+            detail: `Conversion rate fell by ${formatPpDelta(amazonDrop)} to ${formatPercent(metrics.currentTotals.amazonCvr)}.`,
+            severity: 'critical',
+            metric: 'units'
+        });
+    }
+
+    const bonsaiDrop = metrics.currentTotals.bonsaiCvr - metrics.previousTotals.bonsaiCvr;
+    if (bonsaiDrop <= -1.5) {
+        currentAlerts.push({
+            title: 'Storefront CVR down 1.5pp+ (vs comparison)',
+            detail: `Conversion rate fell by ${formatPpDelta(bonsaiDrop)} to ${formatPercent(metrics.currentTotals.bonsaiCvr)}.`,
+            severity: 'warning',
+            metric: 'orders'
+        });
+    }
+
+    const wowAlerts = computeWowCvrAlerts();
+    wowAlerts.forEach(alert => currentAlerts.push(alert));
+
+    currentAlerts.push({
+        title: 'Stockouts on top SKUs',
+        detail: 'Inventory signals are not yet connected.',
+        severity: 'info',
+        metric: null
+    });
+
+    currentAlerts.push({
+        title: 'Ads CPA above target',
+        detail: 'Marketing spend data is not yet connected.',
+        severity: 'info',
+        metric: null
+    });
+
+    const count = currentAlerts.filter(alert => alert.severity !== 'info').length;
+    document.getElementById('alertsCount').textContent = count.toString();
+
+    renderAlertList('risksList', currentAlerts);
+    renderAlertList('alertsList', currentAlerts);
+}
+
+function computeWowCvrAlerts() {
+    const alerts = [];
+    const sorted = sortByDateDesc(dashboardData);
+    if (sorted.length < 2) return alerts;
+
+    const latest = sorted[0];
+    const previous = sorted[1];
+
+    const latestAmazonCvr = latest.amazon_sessions ? (latest.amazon_orders / latest.amazon_sessions) * 100 : 0;
+    const prevAmazonCvr = previous.amazon_sessions ? (previous.amazon_orders / previous.amazon_sessions) * 100 : 0;
+    const amazonDrop = latestAmazonCvr - prevAmazonCvr;
+
+    if (amazonDrop <= -2) {
+        alerts.push({
+            title: 'Amazon CVR down 2pp+ (WoW)',
+            detail: `Latest week CVR is ${formatPercent(latestAmazonCvr)}.`,
+            severity: 'critical',
+            metric: 'units'
+        });
+    }
+
+    const latestBonsaiCvr = latest.bonsai_sessions ? (latest.bonsai_orders / latest.bonsai_sessions) * 100 : 0;
+    const prevBonsaiCvr = previous.bonsai_sessions ? (previous.bonsai_orders / previous.bonsai_sessions) * 100 : 0;
+    const bonsaiDrop = latestBonsaiCvr - prevBonsaiCvr;
+
+    if (bonsaiDrop <= -1.5) {
+        alerts.push({
+            title: 'Storefront CVR down 1.5pp+ (WoW)',
+            detail: `Latest week CVR is ${formatPercent(latestBonsaiCvr)}.`,
+            severity: 'warning',
+            metric: 'orders'
+        });
+    }
+
+    return alerts;
+}
+
+function renderAlertList(id, alerts) {
+    const list = document.getElementById(id);
+    list.innerHTML = '';
+
+    alerts.forEach(alert => {
+        const item = document.createElement('li');
+        item.className = `alert-item ${alert.severity}`;
+        if (alert.metric) {
+            item.dataset.metric = alert.metric;
+        }
+        item.innerHTML = `
+            <div class="alert-title">${alert.title}</div>
+            <div class="alert-detail">${alert.detail}</div>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function renderPanelBreakdown(metrics) {
+    const title = document.getElementById('panelMetricTitle');
+    title.textContent = metricLabel(uiState.activeMetric);
+
+    const breakdownList = document.getElementById('panelChannelBreakdown');
+    breakdownList.innerHTML = '';
+
+    const channelEntries = [
+        { key: 'bonsai', name: 'Online Storefront' },
+        { key: 'amazon', name: 'Amazon' },
+        { key: 'wholesale', name: 'Wholesale' }
+    ];
+
+    channelEntries.forEach(entry => {
+        const value = getChannelMetricValue(entry.key, metrics, uiState.activeMetric);
+        const item = document.createElement('li');
+        item.className = 'panel-item';
+        item.innerHTML = `
+            <div>${entry.name}</div>
+            <div class="driver-value">${formatPanelValue(value, uiState.activeMetric)}</div>
+        `;
+        breakdownList.appendChild(item);
+    });
+}
+
+function getChannelMetricValue(channelKey, metrics, metric) {
+    const channel = metrics.currentTotals.channels[channelKey];
+    if (!channel) return null;
+    switch (metric) {
+        case 'net_revenue':
+            return channel.revenue;
+        case 'gross_profit':
+            return channel.profit;
+        case 'contribution_margin':
+            return channel.gmPct;
+        case 'orders':
+            return channel.orders;
+        case 'aov':
+            return channel.orders ? channel.revenue / channel.orders : 0;
+        case 'units':
+            return channelKey === 'amazon' ? metrics.currentTotals.amazonUnits : null;
+        default:
+            return null;
+    }
+}
+
+function formatPanelValue(value, metric) {
+    if (value === null || value === undefined) return 'N/A';
+    if (metric === 'contribution_margin') {
+        return formatPercent(value);
+    }
+    if (metric === 'orders' || metric === 'units') {
+        return formatNumber(value);
+    }
+    if (metric === 'aov' || metric === 'net_revenue' || metric === 'gross_profit') {
+        return formatCurrency(value);
+    }
+    return formatValue(value, 'text');
+}
+
+function renderNotes() {
+    const notesList = document.getElementById('notesList');
+    const notes = loadNotes();
+    notesList.innerHTML = '';
+
+    if (!notes.length) {
+        const item = document.createElement('li');
+        item.className = 'panel-item note-item';
+        item.textContent = 'No notes yet for this range.';
+        notesList.appendChild(item);
+        return;
+    }
+
+    notes.forEach(note => {
+        const item = document.createElement('li');
+        item.className = 'panel-item note-item';
+        item.innerHTML = `
+            <div><strong>${note.rangeLabel}</strong></div>
+            <div>${note.text}</div>
+            <div class="panel-meta">${formatDateTime(note.createdAt)}</div>
+        `;
+        notesList.appendChild(item);
+    });
+}
+
+function addNote() {
+    const input = document.getElementById('noteInput');
+    const text = input.value.trim();
+    if (!text) return;
+
+    const rangeLabel = getDateRangeLabel(filterDataByRange(dashboardData, uiState));
+    const notes = loadNotes();
+    notes.unshift({
+        id: Date.now(),
+        text,
+        rangeLabel,
+        createdAt: new Date().toISOString()
+    });
+    saveNotes(notes);
+    input.value = '';
+    renderNotes();
+}
+
+function loadNotes() {
+    try {
+        const stored = localStorage.getItem(NOTES_STORAGE_KEY);
+        return stored ? JSON.parse(stored) : [];
+    } catch (error) {
+        console.warn('Failed to load notes', error);
+        return [];
+    }
+}
+
+function saveNotes(notes) {
+    localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(notes));
+}
+
+function handleDriverClick(event) {
+    const item = event.target.closest('.driver-item');
+    if (!item) return;
+    uiState.activeMetric = item.dataset.metric;
+    openPanel('channel');
+}
+
+function handleAlertClick(event) {
+    const item = event.target.closest('.alert-item');
+    if (!item) return;
+    if (item.dataset.metric) {
+        uiState.activeMetric = item.dataset.metric;
+        openPanel('channel');
+    }
+}
+
+function metricLabel(metric) {
+    switch (metric) {
+        case 'gross_profit':
+            return 'Estimated Gross Profit';
+        case 'contribution_margin':
+            return 'Contribution Margin %';
+        case 'orders':
+            return 'Orders';
+        case 'aov':
+            return 'Average Order Value';
+        case 'units':
+            return 'Units (Amazon)';
+        case 'marketing_spend':
+            return 'Marketing Spend / MER';
+        case 'inventory_cover':
+            return 'Inventory Cover';
+        case 'net_revenue':
+        default:
+            return 'Net Revenue';
+    }
+}
+
+function getDateRangeLabel(data) {
+    if (!data.length) return 'No data';
+    const dates = data.map(item => new Date(item.week_start + 'T00:00:00Z')).sort((a, b) => a - b);
+    const start = dates[0];
+    const end = dates[dates.length - 1];
+    return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+}
+
+function sum(data, key) {
+    return data.reduce((total, item) => total + (Number(item[key]) || 0), 0);
+}
+
+function formatValue(value, format) {
+    switch (format) {
+        case 'currency':
+            return formatCurrency(value);
+        case 'percent':
+            return formatPercent(value);
+        case 'number':
+            return formatNumber(value);
+        case 'text':
+        default:
+            return value;
+    }
+}
+
+function formatDelta(delta, config) {
+    if (config.deltaFormat === 'pp') {
+        const sign = delta >= 0 ? '+' : '-';
+        return `${sign}${Math.abs(delta).toFixed(1)}pp`;
+    }
+    if (config.format === 'currency') {
+        return formatSignedCurrency(delta);
+    }
+    if (config.format === 'number') {
+        return formatSignedNumber(delta);
+    }
+    return formatValue(delta, config.format);
 }
 
 function formatCurrency(value) {
@@ -941,8 +1049,23 @@ function formatNumber(value) {
 }
 
 function formatPercent(value) {
-    if (value === null || value === undefined) return '0.0%';
-    return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+    if (value === null || value === undefined || Number.isNaN(value)) return '0.0%';
+    return `${value.toFixed(1)}%`;
+}
+
+function formatSignedCurrency(value) {
+    const sign = value >= 0 ? '+' : '-';
+    return `${sign}${formatCurrency(Math.abs(value))}`;
+}
+
+function formatSignedNumber(value) {
+    const sign = value >= 0 ? '+' : '-';
+    return `${sign}${formatNumber(Math.abs(value))}`;
+}
+
+function formatPpDelta(value) {
+    const sign = value >= 0 ? '+' : '-';
+    return `${sign}${Math.abs(value).toFixed(1)}pp`;
 }
 
 function formatDate(dateString) {
@@ -950,31 +1073,55 @@ function formatDate(dateString) {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-// Render Wholesale Customers Table
-function renderWholesaleCustomers(customers) {
-    const tbody = document.getElementById('wholesaleCustomersTableBody');
-    tbody.innerHTML = '';
+function formatDateTime(dateString) {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+}
 
-    if (!customers || customers.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" style="padding: 1rem; text-align: center;">No data available</td></tr>';
-        return;
-    }
+function getChartOptions(yAxisLabel, stacked) {
+    return {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+            legend: {
+                labels: {
+                    color: '#9aa6bd',
+                    font: { size: 12 }
+                }
+            },
+            tooltip: {
+                backgroundColor: '#0f172a',
+                titleColor: '#f8fafc',
+                bodyColor: '#9aa6bd',
+                borderColor: 'rgba(148, 163, 184, 0.25)',
+                borderWidth: 1
+            }
+        },
+        scales: {
+            x: {
+                grid: { color: 'rgba(148, 163, 184, 0.12)' },
+                ticks: { color: '#9aa6bd', font: { size: 11 } },
+                stacked: stacked
+            },
+            y: {
+                grid: { color: 'rgba(148, 163, 184, 0.12)' },
+                ticks: { color: '#9aa6bd', font: { size: 11 } },
+                title: {
+                    display: true,
+                    text: yAxisLabel,
+                    color: '#9aa6bd'
+                },
+                stacked: stacked
+            }
+        }
+    };
+}
 
-    customers.forEach(customer => {
-        const tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid var(--border-color)';
-        tr.style.transition = 'background-color 0.2s';
-
-        // Hover effect helper
-        tr.onmouseover = () => tr.style.backgroundColor = 'rgba(55, 65, 81, 0.3)';
-        tr.onmouseout = () => tr.style.backgroundColor = 'transparent';
-
-        tr.innerHTML = `
-            <td style="padding: 1rem 1.5rem; color: #fff; font-weight: 500;">${customer.company_name || 'N/A'}</td>
-            <td style="padding: 1rem 1.5rem;">${customer.customer_name || 'N/A'}</td>
-            <td style="padding: 1rem 1.5rem;">${formatNumber(customer.total_orders)}</td>
-            <td style="padding: 1rem 1.5rem; text-align: right; color: #10b981; font-weight: 500;">${formatCurrency(customer.total_revenue)}</td>
-        `;
-        tbody.appendChild(tr);
-    });
+function hexToRgba(hex, alpha) {
+    const parsed = hex.replace('#', '');
+    const bigint = parseInt(parsed, 16);
+    const r = (bigint >> 16) & 255;
+    const g = (bigint >> 8) & 255;
+    const b = bigint & 255;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
