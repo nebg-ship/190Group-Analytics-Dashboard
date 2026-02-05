@@ -16,7 +16,6 @@ const uiState = {
     dateRange: 'ytd',
     comparisonMode: 'prior-period',
     channel: 'all',
-    geography: 'all',
     customerType: 'all',
     category: 'all',
     device: 'all',
@@ -37,13 +36,14 @@ const KPI_CONFIG = {
     orders: { valueId: 'kpiOrders', metaId: 'kpiOrdersMeta', format: 'number' },
     aov: { valueId: 'kpiAov', metaId: 'kpiAovMeta', format: 'currency' },
     units: { valueId: 'kpiUnits', metaId: 'kpiUnitsMeta', format: 'number' },
-    marketing_spend: { valueId: 'kpiMarketingSpend', metaId: 'kpiMarketingSpendMeta', format: 'text', placeholder: 'Not Connected' },
+    marketing_spend: { valueId: 'kpiMarketingSpend', metaId: 'kpiMarketingSpendMeta', format: 'currency' },
     inventory_cover: { valueId: 'kpiInventoryCover', metaId: 'kpiInventoryCoverMeta', format: 'text', placeholder: 'Not Connected' }
 };
 
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     loadDashboardData();
+    toggleCustomerTypeVisibility(uiState.channel);
 });
 
 function setupEventListeners() {
@@ -65,9 +65,9 @@ function setupEventListeners() {
 
     bindSelect('filterChannel', (value) => {
         uiState.channel = value;
+        toggleCustomerTypeVisibility(value);
         updateDashboard();
     });
-    bindSelect('filterGeography', (value) => { uiState.geography = value; });
     bindSelect('filterCustomerType', (value) => { uiState.customerType = value; });
     bindSelect('filterCategory', (value) => { uiState.category = value; });
     bindSelect('filterDevice', (value) => { uiState.device = value; });
@@ -122,11 +122,21 @@ function setupEventListeners() {
     document.getElementById('negativeDrivers').addEventListener('click', handleDriverClick);
     document.getElementById('risksList').addEventListener('click', handleAlertClick);
     document.getElementById('alertsList').addEventListener('click', handleAlertClick);
+
+    // SKU Clicks for variations
+    document.getElementById('topBonsaiSkusList').addEventListener('click', handleSkuClick);
 }
 
 function bindSelect(id, onChange) {
     const el = document.getElementById(id);
     el.addEventListener('change', (event) => onChange(event.target.value));
+}
+
+function toggleCustomerTypeVisibility(channel) {
+    const customerTypeFilter = document.getElementById('customerTypeFilter');
+    if (customerTypeFilter) {
+        customerTypeFilter.classList.toggle('hidden', channel !== 'bonsai');
+    }
 }
 
 function toggleCustomRange(show) {
@@ -182,6 +192,9 @@ function switchPanelTab(tab) {
     if (tab === 'notes') {
         renderNotes();
     }
+    if (tab === 'variations') {
+        // Handled by handleSkuClick, but can re-render if we have active product
+    }
 }
 
 async function loadDashboardData() {
@@ -232,8 +245,71 @@ function updateDashboard() {
     renderChannelEfficiencyTable(metrics);
     renderDrivers(metrics, topSkuData);
     updateTopSkuData(filteredData, comparisonData);
+    updateTopSkusChannelData(filteredData);
     renderAlerts(metrics);
     renderPanelBreakdown(metrics);
+}
+
+function updateTopSkusChannelData(filteredData) {
+    const range = getWeekRange(filteredData);
+    if (!range) return;
+
+    fetchTopSkusChannel(range);
+}
+
+async function fetchTopSkusChannel(range) {
+    const params = new URLSearchParams({
+        start: range.start,
+        end: range.end
+    });
+
+    try {
+        const response = await fetch(`http://localhost:5000/api/top-skus-channel?${params.toString()}`);
+        const result = await response.json();
+        if (result.success) {
+            renderTopSkusByChannel(result.data);
+        }
+    } catch (error) {
+        console.error('Error fetching top SKUs by channel:', error);
+    }
+}
+
+function renderTopSkusByChannel(data) {
+    renderSkuList('topAmazonSkusList', data.amazon);
+    renderSkuList('topBonsaiSkusList', data.bonsai);
+}
+
+function renderSkuList(containerId, items) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!items || items.length === 0) {
+        container.innerHTML = '<div class="panel-placeholder">No data for this period</div>';
+        return;
+    }
+
+    container.innerHTML = items.map((item, index) => {
+        const primaryText = item.product_name || item.sku;
+        const secondaryText = item.sku !== primaryText ? item.sku : '';
+        const revenue = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(item.revenue);
+        const units = new Intl.NumberFormat('en-US').format(item.units);
+
+        return `
+            <div class="sku-item ${containerId === 'topBonsaiSkusList' ? 'clickable' : ''}" 
+                 ${item.product_id ? `data-product-id="${item.product_id}"` : ''}
+                 ${item.product_name ? `data-product-name="${item.product_name}"` : ''}>
+                <div class="sku-rank">#${index + 1}</div>
+                <div class="sku-info">
+                    <div class="sku-name">${primaryText} ${containerId === 'topBonsaiSkusList' ? '<span class="variation-hint">(Click for variations)</span>' : ''}</div>
+                    ${secondaryText ? `<div class="sku-code">${secondaryText}</div>` : ''}
+                </div>
+                <div class="sku-stats">
+                    <div class="sku-rev">${revenue}</div>
+                    <div class="sku-units">${units} units</div>
+                </div>
+            </div>
+        `;
+    }).join('');
 }
 
 function updateTopSkuData(filteredData, comparisonData) {
@@ -406,6 +482,7 @@ function computeTotals(data) {
 
     const bonsaiSessions = sum(data, 'bonsai_sessions');
     const amazonSessions = sum(data, 'amazon_sessions');
+    const totalAdSpend = sum(data, 'amazon_ad_spend');
 
     return {
         bonsaiRevenue,
@@ -421,6 +498,11 @@ function computeTotals(data) {
         amazonUnits: sum(data, 'amazon_units'),
         bonsaiSessions,
         amazonSessions,
+        organicSessions: sum(data, 'organic_sessions'),
+        organicUsers: sum(data, 'organic_users'),
+        organicRevenue: sum(data, 'organic_revenue'),
+        totalAdSpend,
+        mer: totalAdSpend > 0 ? totalRevenue / totalAdSpend : 0,
         bonsaiCvr: bonsaiSessions > 0 ? (bonsaiOrders / bonsaiSessions) * 100 : 0,
         amazonCvr: amazonSessions > 0 ? (amazonOrders / amazonSessions) * 100 : 0,
         aov: totalOrders > 0 ? totalRevenue / totalOrders : 0,
@@ -460,7 +542,9 @@ function computeSelectedMetrics(totals, channel) {
                 contribution_margin: totals.amazonRevenue > 0 ? (totals.amazonNet / totals.amazonRevenue) * 100 : null,
                 orders: totals.amazonOrders,
                 aov: totals.amazonOrders > 0 ? totals.amazonRevenue / totals.amazonOrders : 0,
-                units: totals.amazonUnits
+                units: totals.amazonUnits,
+                marketing_spend: totals.totalAdSpend,
+                mer: totals.mer
             };
         case 'bonsai':
             return {
@@ -497,7 +581,9 @@ function computeSelectedMetrics(totals, channel) {
                 contribution_margin: totals.contributionMargin,
                 orders: totals.totalOrders,
                 aov: totals.aov,
-                units: totals.amazonUnits
+                units: totals.amazonUnits,
+                marketing_spend: totals.totalAdSpend,
+                mer: totals.mer
             };
     }
 }
@@ -525,6 +611,13 @@ function renderKpis(metrics, state) {
         }
 
         valueEl.textContent = formatValue(currentValue, config.format);
+
+        if (key === 'marketing_spend') {
+            const mer = metrics.selected.mer;
+            metaEl.textContent = `${mer.toFixed(1)}x MER`;
+            metaEl.className = 'kpi-meta info'; // Use a neutral color for MER
+            return;
+        }
 
         const delta = (currentValue || 0) - (previousValue || 0);
         const deltaText = formatDelta(delta, config);
@@ -667,14 +760,14 @@ function renderDrivers(metrics, topSku) {
     const hasTopSku = topSku && topSku.sku;
     const topSkuDriver = hasTopSku
         ? makeTopSkuDriver(topSku)
-        : makePlaceholderDriver(topSku ? 'Top SKU (No data)' : 'Top SKU (Not Connected)');
+        : makePlaceholderDriver(topSku ? 'Top SKU (No data)' : 'Top SKU');
 
     const drivers = [
         makeDriver('Amazon', metrics.currentTotals.channels.amazon.revenue, metrics.previousTotals.channels.amazon.revenue),
         makeDriver('Online Storefront', metrics.currentTotals.channels.bonsai.revenue, metrics.previousTotals.channels.bonsai.revenue),
         makeDriver('Wholesale', metrics.currentTotals.channels.wholesale.revenue, metrics.previousTotals.channels.wholesale.revenue),
         topSkuDriver,
-        makePlaceholderDriver('Top Category (Not Connected)')
+        makePlaceholderDriver('Top Category')
     ];
 
     const positive = drivers.filter(d => d.delta >= 0).sort((a, b) => b.delta - a.delta).slice(0, 5);
@@ -838,6 +931,40 @@ function renderAlertList(id, alerts) {
     });
 }
 
+function renderMarketingBreakdown(metrics) {
+    const list = document.getElementById('panelMarketingBreakdown');
+    list.innerHTML = '';
+
+    const marketingEntries = [
+        { name: 'Organic', key: 'organic' },
+        { name: 'Paid Search (Amazon)', key: 'amazon_ad' }
+    ];
+
+    marketingEntries.forEach(entry => {
+        const item = document.createElement('li');
+        item.className = 'panel-item';
+
+        let revenue, detail;
+        if (entry.key === 'organic') {
+            revenue = metrics.currentTotals.organicRevenue || 0;
+            detail = `Sessions: ${formatNumber(metrics.currentTotals.organicSessions || 0)}`;
+        } else {
+            // Amazon ad spend is current available in metrics
+            revenue = metrics.currentTotals.amazonAdSpend || 0;
+            detail = 'Attributed from Amazon SP-API';
+        }
+
+        item.innerHTML = `
+            <div>
+                <div>${entry.name}</div>
+                <div class="panel-meta">${detail}</div>
+            </div>
+            <div class="driver-value">${entry.key === 'amazon_ad' ? 'Spend: ' : ''}${formatCurrency(revenue)}</div>
+        `;
+        list.appendChild(item);
+    });
+}
+
 function renderPanelBreakdown(metrics) {
     const title = document.getElementById('panelMetricTitle');
     title.textContent = metricLabel(uiState.activeMetric);
@@ -960,6 +1087,62 @@ function handleDriverClick(event) {
     if (!item) return;
     uiState.activeMetric = item.dataset.metric;
     openPanel('channel');
+}
+
+async function handleSkuClick(event) {
+    const item = event.target.closest('.sku-item.clickable');
+    if (!item) return;
+
+    const productId = item.dataset.productId;
+    const productName = item.dataset.productName;
+    if (!productId) return;
+
+    openPanel('variations');
+    const title = document.getElementById('panelMetricTitle');
+    title.textContent = productName || 'Product Variations';
+
+    const list = document.getElementById('panelVariationBreakdown');
+    list.innerHTML = '<div class="panel-placeholder">Loading variation breakdown...</div>';
+
+    const range = getWeekRange(filterDataByRange(dashboardData, uiState));
+    if (!range) return;
+
+    const params = new URLSearchParams({
+        product_id: productId,
+        start: range.start,
+        end: range.end
+    });
+
+    try {
+        const response = await fetch(`http://localhost:5000/api/sku-variations?${params.toString()}`);
+        const result = await response.json();
+        if (result.success) {
+            renderVariationBreakdown(result.data);
+        } else {
+            list.innerHTML = `<div class="panel-placeholder">Error: ${result.error}</div>`;
+        }
+    } catch (error) {
+        console.error('Error fetching variations:', error);
+        list.innerHTML = '<div class="panel-placeholder">Failed to load variations</div>';
+    }
+}
+
+function renderVariationBreakdown(variations) {
+    const list = document.getElementById('panelVariationBreakdown');
+    if (!variations || variations.length === 0) {
+        list.innerHTML = '<div class="panel-placeholder">No variations found</div>';
+        return;
+    }
+
+    list.innerHTML = variations.map(v => `
+        <li class="panel-item">
+            <div>
+                <div>${v.sku}</div>
+                <div class="panel-meta">${v.units} units</div>
+            </div>
+            <div class="driver-value">${formatCurrency(v.revenue)}</div>
+        </li>
+    `).join('');
 }
 
 function handleAlertClick(event) {

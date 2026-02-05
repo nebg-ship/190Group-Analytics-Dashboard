@@ -14,3 +14,12 @@ To ensure consistent year-over-year analysis, the following categories should be
 ## Reporting Logic
 
 - When calculating category-level performance, group the above categories together to avoid showing false drops or gains due to naming changes.
+
+## SKU Mappings
+
+To align Amazon (SP-API) SKUs with internal product codes (BigCommerce/Settlements), use the following translation:
+
+| Amazon MSKU | Target SKU | Notes |
+| :--- | :--- | :--- |
+| `AX-4L4U-UPMZ` | `PPT6-9` | Amazon code for PPT6-9 |
+| `8V-JLTS-MCY9` | `PPT8-9` | Amazon code for PPT8-9 |

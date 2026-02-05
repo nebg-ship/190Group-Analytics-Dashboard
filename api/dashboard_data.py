@@ -25,7 +25,7 @@ AMAZON_ECON_DATASET = os.getenv('AMAZON_ECON_DATASET', 'amazon_econ')
 WHOLESALE_DATASET = os.getenv('WHOLESALE_DATASET', 'wholesale')
 
 # Hardwired BigCommerce line-item table + columns (per user confirmation)
-LINE_ITEMS_TABLE = 'bc_order_product'
+LINE_ITEMS_TABLE = 'bc_order_line_items'
 LINE_ITEMS_SKU_COL = 'sku'
 LINE_ITEMS_NAME_COL = 'product_name'
 LINE_ITEMS_QTY_COL = 'quantity'
@@ -36,27 +36,19 @@ def get_bigquery_client():
     return bigquery.Client(project=PROJECT_ID)
 
 def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=None):
-    table_name = LINE_ITEMS_TABLE
-    sku_expr = f"CAST(li.`{LINE_ITEMS_SKU_COL}` AS STRING)"
-    name_expr = f"CAST(li.`{LINE_ITEMS_NAME_COL}` AS STRING)"
-    units_value_expr = f"COALESCE(SAFE_CAST(li.`{LINE_ITEMS_QTY_COL}` AS INT64), 0)"
-    revenue_value_expr = f"COALESCE(SAFE_CAST(li.`{LINE_ITEMS_TOTAL_COL}` AS FLOAT64), 0)"
-
     base_query = f"""
-        WITH orders AS (
-            SELECT order_id
-            FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
-            WHERE DATE(order_created_date_time) BETWEEN @start_date AND @end_date
-              AND order_status_id NOT IN (0, 3, 5, 6)
-        )
         SELECT
-            {sku_expr} AS sku,
-            {name_expr} AS product_name,
-            SUM({units_value_expr}) AS units,
-            ROUND(SUM({revenue_value_expr}), 2) AS revenue
-        FROM `{PROJECT_ID}.{SALES_DATASET}.{table_name}` AS li
-        JOIN orders o ON li.`{LINE_ITEMS_ORDER_ID_COL}` = o.order_id
-        WHERE {sku_expr} IS NOT NULL AND {sku_expr} != ''
+            p.sku AS sku,
+            p.product_name AS product_name,
+            SUM(li.quantity) AS units,
+            ROUND(SUM(li.total_ex_tax), 2) AS revenue
+        FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order_line_items` AS li
+        JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
+        JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
+        WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
+          AND o.order_status_id NOT IN (0, 3, 5, 6)
+          AND p.sku IS NOT NULL AND p.sku != ''
+          AND NOT (LOWER(p.sku) LIKE 'web%' OR LOWER(p.sku) LIKE 'tweb%')
         GROUP BY 1, 2
         ORDER BY revenue DESC
         LIMIT 1
@@ -82,18 +74,15 @@ def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=
 
     if compare_start and compare_end:
         compare_query = f"""
-            WITH orders AS (
-                SELECT order_id
-                FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
-                WHERE DATE(order_created_date_time) BETWEEN @start_date AND @end_date
-                  AND order_status_id NOT IN (0, 3, 5, 6)
-            )
             SELECT
-                SUM({units_value_expr}) AS units,
-                ROUND(SUM({revenue_value_expr}), 2) AS revenue
-            FROM `{PROJECT_ID}.{SALES_DATASET}.{table_name}` AS li
-            JOIN orders o ON li.`{LINE_ITEMS_ORDER_ID_COL}` = o.order_id
-            WHERE {sku_expr} = @sku
+                SUM(li.quantity) AS units,
+                ROUND(SUM(li.total_ex_tax), 2) AS revenue
+            FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order_line_items` AS li
+            JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
+            JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
+            WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
+              AND o.order_status_id NOT IN (0, 3, 5, 6)
+              AND p.sku = @sku
         """
         compare_config = bigquery.QueryJobConfig(
             query_parameters=[
@@ -159,7 +148,8 @@ def get_dashboard_data():
             EXTRACT(YEAR FROM DATE(business_date)) as year,
             ROUND(SUM(CAST(gross_sales AS FLOAT64)), 2) as total_sales,
             SUM(units) as total_units,
-            ROUND(SUM(CAST(net_proceeds AS FLOAT64)), 2) as net_proceeds
+            ROUND(SUM(CAST(net_proceeds AS FLOAT64)), 2) as net_proceeds,
+            ROUND(SUM(CAST(ad_spend AS FLOAT64)), 2) as total_ad_spend
           FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_sku_day_us`
           WHERE business_date >= '2025-01-01'
           GROUP BY 1, 2
@@ -178,14 +168,41 @@ def get_dashboard_data():
             week_start, 
             year, 
             SUM(sessions) as sessions, 
-            SUM(users) as users
+            SUM(users) as users,
+            SUM(organic_sessions) as organic_sessions,
+            SUM(organic_users) as organic_users,
+            SUM(organic_revenue) as organic_revenue,
+            SUM(organic_orders) as organic_orders
           FROM (
             -- Live BigQuery Export Data (where available)
             SELECT
               GREATEST(DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)), DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), YEAR)) as week_start,
               EXTRACT(YEAR FROM PARSE_DATE('%Y%m%d', event_date)) as year,
               COUNTIF(event_name = 'session_start') as sessions,
-              COUNT(DISTINCT user_pseudo_id) as users
+              COUNT(DISTINCT user_pseudo_id) as users,
+              COUNTIF(event_name = 'session_start' AND (
+                session_traffic_source_last_click.cross_channel_campaign.primary_channel_group IN ('Organic Search', 'Organic Social', 'Organic Video', 'Organic Shopping')
+                OR LOWER(traffic_source.medium) = 'organic'
+              )) as organic_sessions,
+              COUNT(DISTINCT IF(
+                session_traffic_source_last_click.cross_channel_campaign.primary_channel_group IN ('Organic Search', 'Organic Social', 'Organic Video', 'Organic Shopping')
+                OR LOWER(traffic_source.medium) = 'organic',
+                user_pseudo_id, NULL
+              )) as organic_users,
+              SUM(IF(
+                event_name = 'purchase' AND (
+                  session_traffic_source_last_click.cross_channel_campaign.primary_channel_group IN ('Organic Search', 'Organic Social', 'Organic Video', 'Organic Shopping')
+                  OR LOWER(traffic_source.medium) = 'organic'
+                ),
+                CAST(ecommerce.purchase_revenue AS FLOAT64), 0
+              )) as organic_revenue,
+              COUNT(DISTINCT IF(
+                event_name = 'purchase' AND (
+                  session_traffic_source_last_click.cross_channel_campaign.primary_channel_group IN ('Organic Search', 'Organic Social', 'Organic Video', 'Organic Shopping')
+                  OR LOWER(traffic_source.medium) = 'organic'
+                ),
+                ecommerce.transaction_id, NULL
+              )) as organic_orders
             FROM `{PROJECT_ID}.{GA4_DATASET}.events_*`
             WHERE _TABLE_SUFFIX >= '20250430'
             GROUP BY 1, 2
@@ -198,7 +215,11 @@ def get_dashboard_data():
               GREATEST(DATE_TRUNC(hb.`date`, WEEK(MONDAY)), DATE_TRUNC(hb.`date`, YEAR)) as week_start,
               EXTRACT(YEAR FROM hb.`date`) as year,
               SUM(hb.sessions) as sessions,
-              SUM(hb.users) as users
+              SUM(hb.users) as users,
+              0 as organic_sessions,
+              0 as organic_users,
+              0 as organic_revenue,
+              0 as organic_orders
             FROM `{PROJECT_ID}.{GA4_DATASET}.ga4_historical_summary` AS hb
             GROUP BY 1, 2
           )
@@ -215,31 +236,15 @@ def get_dashboard_data():
         ),
         wholesale_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(COALESCE(order_date, DATE(ingested_at))), WEEK(MONDAY)), DATE_TRUNC(DATE(COALESCE(order_date, DATE(ingested_at))), YEAR)) as week_start,
-            EXTRACT(YEAR FROM DATE(COALESCE(order_date, DATE(ingested_at)))) as year,
+            GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(order_created_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders,
-            ROUND(SUM(CAST(grand_total AS FLOAT64)), 2) as total_revenue
-          FROM (
-            -- Deduplicate on the fly: take the max total and date for each order_id
-            SELECT order_id, MAX(order_date) as order_date, MAX(grand_total) as grand_total, MAX(ingested_at) as ingested_at
-            FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.order_header`
-            WHERE grand_total > 0
-            GROUP BY order_id
-          )
-          WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2025-01-01'
+            ROUND(SUM(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as total_revenue
+          FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order`
+          WHERE DATE(order_created_date_time) >= '2025-01-01'
+            -- Exclude: 0 (Incomplete), 3 (Partially Shipped), 5 (Cancelled), 6 (Declined)
+            AND order_status_id NOT IN (0, 3, 5, 6)
           GROUP BY 1, 2
-        ),
-        wholesale_customers AS (
-          SELECT
-            COALESCE(NULLIF(company_name, ''), customer_name) as display_company,
-            COUNT(DISTINCT order_id) as total_orders,
-            ROUND(SUM(CAST(grand_total AS FLOAT64)), 2) as total_revenue
-          FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.order_header`
-          WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2026-01-01'
-            AND grand_total > 0
-          GROUP BY 1
-          ORDER BY 3 DESC
-          LIMIT 20
         ),
         weeks AS (
           SELECT week_start, year FROM bonsai_weekly
@@ -265,6 +270,10 @@ def get_dashboard_data():
           COALESCE(bt.returning_customers, 0) as bonsai_returning_customers,
           COALESCE(g.sessions, 0) as bonsai_sessions,
           COALESCE(g.users, 0) as bonsai_users,
+          COALESCE(g.organic_sessions, 0) as organic_sessions,
+          COALESCE(g.organic_users, 0) as organic_users,
+          COALESCE(g.organic_revenue, 0) as organic_revenue,
+          COALESCE(g.organic_orders, 0) as organic_orders,
           ROUND(SAFE_DIVIDE(COALESCE(b.total_orders, 0), COALESCE(g.sessions, 0)) * 100, 2) as bonsai_cvr,
           COALESCE(a.total_units, 0) as amazon_units,
           COALESCE(a.total_sales, 0) as amazon_revenue,
@@ -275,7 +284,8 @@ def get_dashboard_data():
           ROUND((COALESCE(a.net_proceeds, 0) / NULLIF(COALESCE(a.total_sales, 0), 0)) * 100, 2) as amazon_margin_pct,
           COALESCE(wh.total_orders, 0) as wholesale_orders,
           COALESCE(wh.total_revenue, 0) as wholesale_revenue,
-          ROUND(SAFE_DIVIDE(COALESCE(CAST(wh.total_revenue AS FLOAT64), 0), NULLIF(COALESCE(wh.total_orders, 0), 0)), 2) as wholesale_aov,
+          ROUND(SAFE_DIVIDE(COALESCE(CAST(wh.total_revenue AS FLOAT64)), NULLIF(COALESCE(wh.total_orders, 0), 0)), 2) as wholesale_aov,
+          COALESCE(a.total_ad_spend, 0) as amazon_ad_spend,
           ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.total_sales, 0) + COALESCE(wh.total_revenue, 0), 2) as total_company_revenue,
           ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.net_proceeds, 0) + COALESCE(wh.total_revenue, 0), 2) as estimated_company_profit
         FROM weeks w
@@ -306,35 +316,16 @@ def get_dashboard_data():
         
         # Fetch Top Wholesale Customers separately to keep it clean
         customer_query = f"""
-        WITH deduplicated_orders AS (
-            SELECT 
-                order_id, 
-                MAX(company_name) as company_name, 
-                MAX(customer_name) as customer_name, 
-                MAX(order_date) as order_date, 
-                MAX(grand_total) as grand_total,
-                MAX(ingested_at) as ingested_at
-            FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.order_header`
-            WHERE grand_total > 0
-            GROUP BY order_id
-        ),
-        consolidated_customers AS (
-            SELECT
-                COALESCE(NULLIF(company_name, ''), customer_name) as display_company,
-                STRING_AGG(DISTINCT customer_name, ', ') as contact_names,
-                COUNT(DISTINCT order_id) as total_orders,
-                SUM(CAST(grand_total AS FLOAT64)) as total_revenue,
-                MAX(DATE(COALESCE(order_date, DATE(ingested_at)))) as latest_order
-            FROM deduplicated_orders
-            WHERE DATE(COALESCE(order_date, DATE(ingested_at))) >= '2026-01-01'
-            GROUP BY 1
-        )
         SELECT
-            display_company as company_name,
-            contact_names as customer_name,
-            total_orders,
-            ROUND(total_revenue, 2) as total_revenue
-        FROM consolidated_customers
+            COALESCE(NULLIF(ba.company, ''), ba.full_name) as company_name,
+            STRING_AGG(DISTINCT ba.full_name, ', ') as customer_name,
+            COUNT(DISTINCT o.order_id) as total_orders,
+            ROUND(SUM(CAST(o.sub_total_excluding_tax AS FLOAT64)), 2) as total_revenue
+        FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order` o
+        LEFT JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order_billing_addresses` ba ON o.order_id = ba.order_id
+        WHERE DATE(o.order_created_date_time) >= '2026-01-01'
+            AND o.order_status_id NOT IN (0, 3, 5, 6)
+        GROUP BY 1
         ORDER BY total_revenue DESC
         LIMIT 20
         """
@@ -364,6 +355,57 @@ def get_dashboard_data():
             'error': str(e)
         }), 500
 
+def query_top_skus_by_channel(client, start_date, end_date):
+    """Query top 5 SKUs for Amazon and Bonsai."""
+    # Bonsai Query
+    bonsai_query = f"""
+        SELECT
+            p.product_id,
+            p.sku,
+            p.product_name,
+            SUM(li.quantity) AS units,
+            ROUND(SUM(li.total_ex_tax), 2) AS revenue
+        FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order_line_items` AS li
+        JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
+        JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
+        WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
+          AND o.order_status_id NOT IN (0, 3, 5, 6)
+          AND p.sku IS NOT NULL AND p.sku != ''
+          AND NOT (LOWER(p.sku) LIKE 'web%' OR LOWER(p.sku) LIKE 'tweb%')
+        GROUP BY 1, 2, 3
+        ORDER BY revenue DESC
+        LIMIT 5
+    """
+    
+    # Amazon Query
+    amazon_query = f"""
+        SELECT
+            msku AS sku,
+            msku AS product_name, -- Use MSKU as name for now
+            SUM(ordered_product_sales) AS revenue,
+            SUM(units_ordered) AS units
+        FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_business_reports_us`
+        WHERE report_date BETWEEN @start_date AND @end_date
+        GROUP BY 1, 2
+        ORDER BY revenue DESC
+        LIMIT 5
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter('start_date', 'DATE', start_date),
+            bigquery.ScalarQueryParameter('end_date', 'DATE', end_date)
+        ]
+    )
+
+    bonsai_results = [dict(row) for row in client.query(bonsai_query, job_config=job_config).result()]
+    amazon_results = [dict(row) for row in client.query(amazon_query, job_config=job_config).result()]
+
+    return {
+        'bonsai': bonsai_results,
+        'amazon': amazon_results
+    }
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -390,6 +432,90 @@ def get_top_sku():
         return jsonify({
             'success': True,
             'top_sku': top_sku,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/top-skus-channel', methods=['GET'])
+def get_top_skus_channel():
+    """Fetch top 5 SKUs per channel."""
+    try:
+        start_date = request.args.get('start')
+        end_date = request.args.get('end')
+
+        if not start_date or not end_date:
+            return jsonify({
+                'success': False,
+                'error': 'start and end query parameters are required (YYYY-MM-DD).'
+            }), 400
+
+        client = get_bigquery_client()
+        skus = query_top_skus_by_channel(client, start_date, end_date)
+
+        return jsonify({
+            'success': True,
+            'data': skus,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+def query_sku_variations(client, product_id, start_date, end_date):
+    """Query variation breakdown for a specific product."""
+    query = f"""
+        SELECT
+            li.variant_id,
+            COALESCE(v.variants_sku, 'No SKU') as sku,
+            SUM(li.quantity) as units,
+            ROUND(SUM(li.total_ex_tax), 2) as revenue
+        FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order_line_items` li
+        LEFT JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product_variants` v ON li.variant_id = v.variants_id
+        WHERE li.product_id = @product_id
+          AND EXISTS (
+              SELECT 1 FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order` o 
+              WHERE o.order_id = li.order_id 
+                AND DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
+                AND o.order_status_id NOT IN (0, 3, 5, 6)
+          )
+        GROUP BY 1, 2
+        ORDER BY revenue DESC
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter('product_id', 'INTEGER', product_id),
+            bigquery.ScalarQueryParameter('start_date', 'DATE', start_date),
+            bigquery.ScalarQueryParameter('end_date', 'DATE', end_date)
+        ]
+    )
+    return [dict(row) for row in client.query(query, job_config=job_config).result()]
+
+@app.route('/api/sku-variations', methods=['GET'])
+def get_sku_variations():
+    """Fetch variation breakdown for a specific product."""
+    try:
+        product_id = request.args.get('product_id')
+        start_date = request.args.get('start')
+        end_date = request.args.get('end')
+
+        if not product_id or not start_date or not end_date:
+            return jsonify({
+                'success': False,
+                'error': 'product_id, start, and end query parameters are required.'
+            }), 400
+
+        client = get_bigquery_client()
+        variations = query_sku_variations(client, int(product_id), start_date, end_date)
+
+        return jsonify({
+            'success': True,
+            'data': variations,
             'timestamp': datetime.now().isoformat()
         })
     except Exception as e:

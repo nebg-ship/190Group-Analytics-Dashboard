@@ -8,3 +8,7 @@ openpyxl
 
 flask
 flask-cors
+google-analytics-data
+google-auth-oauthlib
+pandas
+pyarrow

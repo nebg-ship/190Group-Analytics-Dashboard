@@ -80,16 +80,8 @@
                     <option value="retail">Retail (Not Connected)</option>
                 </select>
             </div>
-            <div class="filter">
-                <label for="filterGeography">Geography</label>
-                <select id="filterGeography">
-                    <option value="all">All Regions</option>
-                    <option value="us">United States</option>
-                    <option value="ca">Canada</option>
-                    <option value="eu">Europe (Not Connected)</option>
-                </select>
-            </div>
-            <div class="filter">
+
+            <div class="filter hidden" id="customerTypeFilter">
                 <label for="filterCustomerType">Customer Type</label>
                 <select id="filterCustomerType">
                     <option value="all">All Customers</option>
@@ -155,7 +147,8 @@
                 </button>
                 <button class="kpi-tile" data-metric="aov">
                     <div class="kpi-label"
-                        data-tooltip="Average order value = net revenue / total orders for the selected scope.">AOV</div>
+                        data-tooltip="Average order value = net revenue / total orders for the selected scope.">AOV
+                    </div>
                     <div class="kpi-value" id="kpiAov">$0</div>
                     <div class="kpi-meta" id="kpiAovMeta">--</div>
                 </button>
@@ -239,6 +232,27 @@
             </section>
 
             <section class="layout-row two-col">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Top 5 Amazon SKUs</h3>
+                        <span class="card-subtitle">By revenue for the period</span>
+                    </div>
+                    <div class="sku-list" id="topAmazonSkusList">
+                        <div class="panel-placeholder">Loading top SKUs...</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Top 5 Bonsai Outlet SKUs</h3>
+                        <span class="card-subtitle">By revenue for the period</span>
+                    </div>
+                    <div class="sku-list" id="topBonsaiSkusList">
+                        <div class="panel-placeholder">Loading top SKUs...</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="layout-row two-col">
                 <div class="card" id="risksPanel">
                     <div class="card-header">
                         <h3>Risks & Opportunities</h3>
@@ -272,6 +286,7 @@
         <div class="panel-tabs">
             <button class="tab-btn active" data-tab="channel">Channel</button>
             <button class="tab-btn" data-tab="category">Category</button>
+            <button class="tab-btn" data-tab="variations">Variations</button>
             <button class="tab-btn" data-tab="marketing">Marketing Source</button>
             <button class="tab-btn" data-tab="notes">Notes</button>
         </div>
@@ -283,8 +298,13 @@
             <div class="panel-tab" id="panelTab-category">
                 <div class="panel-placeholder">Category drivers are not yet connected.</div>
             </div>
+            <div class="panel-tab" id="panelTab-variations">
+                <div class="panel-section-title">Variation breakdown</div>
+                <ul class="panel-list" id="panelVariationBreakdown"></ul>
+            </div>
             <div class="panel-tab" id="panelTab-marketing">
-                <div class="panel-placeholder">Marketing source drivers are not yet connected.</div>
+                <div class="panel-section-title">Decomposition by Marketing Channel</div>
+                <ul class="panel-list" id="panelMarketingBreakdown"></ul>
             </div>
             <div class="panel-tab" id="panelTab-notes">
                 <div class="panel-section-title">Annotations</div>
@@ -319,7 +339,7 @@
                 <div class="drawer-options">
                     <label><input type="checkbox" checked> Paid Search (Not Connected)</label>
                     <label><input type="checkbox"> Paid Social (Not Connected)</label>
-                    <label><input type="checkbox"> Organic (Not Connected)</label>
+                    <label><input type="checkbox"> Organic</label>
                 </div>
             </div>
             <div class="drawer-group">
