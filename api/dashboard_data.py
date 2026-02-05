@@ -23,6 +23,7 @@ GA4_DATASET = os.getenv('GA4_DATASET')
 SALES_DATASET = os.getenv('SALES_DATASET', 'sales')
 AMAZON_ECON_DATASET = os.getenv('AMAZON_ECON_DATASET') or os.getenv('BIGQUERY_DATASET', 'amazon_econ')
 WHOLESALE_DATASET = os.getenv('WHOLESALE_DATASET', 'wholesale')
+GOOGLE_ADS_DATASET = os.getenv('GOOGLE_ADS_DATASET', 'google_ads_190')
 
 # Hardwired BigCommerce line-item table + columns (per user confirmation)
 LINE_ITEMS_TABLE = 'bc_order_line_items'
@@ -246,6 +247,15 @@ def get_dashboard_data():
             AND order_status_id NOT IN (0, 3, 5, 6)
           GROUP BY 1, 2
         ),
+        google_ads_weekly AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(segments_date), WEEK(MONDAY)), DATE_TRUNC(DATE(segments_date), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(segments_date)) as year,
+            ROUND(SUM(CAST(metrics_cost_micros AS FLOAT64)) / 1000000, 2) as total_ad_spend
+          FROM `{PROJECT_ID}.{GOOGLE_ADS_DATASET}.p_ads_CampaignStats_*`
+          WHERE segments_date >= '2025-01-01'
+          GROUP BY 1, 2
+        ),
         weeks AS (
           SELECT week_start, year FROM bonsai_weekly
           UNION DISTINCT
@@ -258,6 +268,8 @@ def get_dashboard_data():
           SELECT week_start, year FROM amazon_orders_weekly
           UNION DISTINCT
           SELECT week_start, year FROM wholesale_weekly
+          UNION DISTINCT
+          SELECT week_start, year FROM google_ads_weekly
         )
         SELECT 
           FORMAT_DATE('%Y-%m-%d', w.week_start) as week_start,
@@ -286,6 +298,8 @@ def get_dashboard_data():
           COALESCE(wh.total_revenue, 0) as wholesale_revenue,
           ROUND(SAFE_DIVIDE(COALESCE(CAST(wh.total_revenue AS FLOAT64)), NULLIF(COALESCE(wh.total_orders, 0), 0)), 2) as wholesale_aov,
           COALESCE(a.total_ad_spend, 0) as amazon_ad_spend,
+          COALESCE(gads.total_ad_spend, 0) as google_ad_spend,
+          ROUND(COALESCE(a.total_ad_spend, 0) + COALESCE(gads.total_ad_spend, 0), 2) as total_ad_spend,
           ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.total_sales, 0) + COALESCE(wh.total_revenue, 0), 2) as total_company_revenue,
           ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.net_proceeds, 0) + COALESCE(wh.total_revenue, 0), 2) as estimated_company_profit
         FROM weeks w
@@ -296,6 +310,7 @@ def get_dashboard_data():
         LEFT JOIN ga4_traffic g ON w.week_start = g.week_start AND w.year = g.year
         LEFT JOIN amazon_orders_weekly ao ON w.week_start = ao.week_start AND w.year = ao.year
         LEFT JOIN wholesale_weekly wh ON w.week_start = wh.week_start AND w.year = wh.year
+        LEFT JOIN google_ads_weekly gads ON w.week_start = gads.week_start AND w.year = gads.year
         ORDER BY w.week_start DESC
         LIMIT 100
         """

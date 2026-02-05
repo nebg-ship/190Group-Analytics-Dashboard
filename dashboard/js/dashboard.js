@@ -482,7 +482,7 @@ function computeTotals(data) {
 
     const bonsaiSessions = sum(data, 'bonsai_sessions');
     const amazonSessions = sum(data, 'amazon_sessions');
-    const totalAdSpend = sum(data, 'amazon_ad_spend');
+    const totalAdSpend = sum(data, 'total_ad_spend');
 
     return {
         bonsaiRevenue,
@@ -502,6 +502,8 @@ function computeTotals(data) {
         organicUsers: sum(data, 'organic_users'),
         organicRevenue: sum(data, 'organic_revenue'),
         totalAdSpend,
+        amazonAdSpend: sum(data, 'amazon_ad_spend'),
+        googleAdSpend: sum(data, 'google_ad_spend'),
         mer: totalAdSpend > 0 ? totalRevenue / totalAdSpend : 0,
         bonsaiCvr: bonsaiSessions > 0 ? (bonsaiOrders / bonsaiSessions) * 100 : 0,
         amazonCvr: amazonSessions > 0 ? (amazonOrders / amazonSessions) * 100 : 0,
@@ -749,8 +751,8 @@ function renderChannelEfficiencyTable(metrics) {
             <td>${channel.gmPct === null ? 'N/A' : formatPercent(channel.gmPct)}</td>
             <td>${formatPercent(orderShare)}</td>
             <td>${formatSignedCurrency(revenueChange)}</td>
-            <td>Not Connected</td>
-            <td>Not Connected</td>
+            <td>${channel.name === 'Amazon' ? formatCurrency(metrics.currentTotals.amazonAdSpend || 0) : (channel.name === 'Online Storefront' ? formatCurrency(metrics.currentTotals.googleAdSpend || 0) : 'N/A')}</td>
+            <td>${channel.name === 'Amazon' ? (metrics.currentTotals.amazonAdSpend > 0 ? (channel.revenue / metrics.currentTotals.amazonAdSpend).toFixed(1) + 'x' : '0x') : (channel.name === 'Online Storefront' ? (metrics.currentTotals.googleAdSpend > 0 ? (channel.revenue / metrics.currentTotals.googleAdSpend).toFixed(1) + 'x' : '0x') : 'N/A')}</td>
         `;
         tbody.appendChild(row);
     });
