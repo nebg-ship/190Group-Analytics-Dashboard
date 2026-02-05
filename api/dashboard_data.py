@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT')
 GA4_DATASET = os.getenv('GA4_DATASET')
 SALES_DATASET = os.getenv('SALES_DATASET', 'sales')
-AMAZON_ECON_DATASET = os.getenv('AMAZON_ECON_DATASET', 'amazon_econ')
+AMAZON_ECON_DATASET = os.getenv('AMAZON_ECON_DATASET') or os.getenv('BIGQUERY_DATASET', 'amazon_econ')
 WHOLESALE_DATASET = os.getenv('WHOLESALE_DATASET', 'wholesale')
 
 # Hardwired BigCommerce line-item table + columns (per user confirmation)

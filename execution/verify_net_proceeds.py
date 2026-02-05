@@ -24,9 +24,9 @@ try:
     print(f"2026 YTD Amazon Net:     ${ytd_net:,.2f}")
     
     if ytd_net > 0:
-        print("\n✅ Verification Successful: Amazon Net Proceeds data is present and greater than zero.")
+        print("\n[OK] Verification Successful: Amazon Net Proceeds data is present and greater than zero.")
     else:
-        print("\n❌ Verification Failed: Amazon Net Proceeds data is missing or zero.")
+        print("\n[FAIL] Verification Failed: Amazon Net Proceeds data is missing or zero.")
         
 except Exception as e:
     print(f"Error: {e}")

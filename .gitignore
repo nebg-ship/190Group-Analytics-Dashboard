@@ -1,5 +1,7 @@
 .tmp/
 .env
+.venv/
+node_modules/
 credentials.json
 token.json
 __pycache__/

@@ -9,6 +9,19 @@ Ingest Amazon Sales and Traffic reports (Business Reports) to capture SKU-level 
 - **Granularity**: SKU-Day
 - **Marketplace**: US Only
 
+## Implementation (Script)
+- **Primary script**: `execution/ingest_amazon_business_reports.py`
+- **Run (default last 7 days ending yesterday)**: `python execution/ingest_amazon_business_reports.py --days 7`
+
+### Required environment variables
+- **Amazon SP-API**: `SP_API_REFRESH_TOKEN`, `SP_API_CLIENT_ID`, `SP_API_CLIENT_SECRET`, `SP_API_AWS_ACCESS_KEY`, `SP_API_AWS_SECRET_KEY`
+- **Optional**: `SP_API_REGION` (default `us-east-1`)
+- **Google Cloud**: `GOOGLE_CLOUD_PROJECT`, `BIGQUERY_DATASET` (default `amazon_econ`), `GCS_BUCKET`
+
+### Outputs
+- **Bronze (GCS)**: `gs://$GCS_BUCKET/amazon/reports/business/us/run_date=YYYY-MM-DD/report_id=<id>/part-000.json.gz`
+- **Silver (BigQuery)**: `${GOOGLE_CLOUD_PROJECT}.${BIGQUERY_DATASET}.fact_business_reports_us`
+
 ## Schema/Fields
 The `GET_SALES_AND_TRAFFIC_REPORT` provides a broad range of metrics. We will focus on:
 - `date`
@@ -56,3 +69,7 @@ The `GET_SALES_AND_TRAFFIC_REPORT` provides a broad range of metrics. We will fo
 ## Orchestration
 - **Frequency**: Daily.
 - **Backfill**: 7 days rolling window to ensure data stability (Amazon reports can take 24-48h to fully stabilize).
+
+## Smoke test
+- Start the API/dashboard: `python run_dashboard.py`
+- Verify YoY matching logic against the API output: `python execution/verify_yoy.py`

@@ -41,6 +41,9 @@ SP_API_ENDPOINT = "https://sellingpartnerapi-na.amazon.com"
 DATA_KIOSK_PATH = "/dataKiosk/2023-11-15/queries"
 DOCUMENTS_PATH = "/dataKiosk/2023-11-15/documents"
 
+def is_gzip_bytes(data: bytes) -> bool:
+    return len(data) >= 2 and data[0] == 0x1F and data[1] == 0x8B
+
 def get_lwa_access_token():
     url = "https://api.amazon.com/auth/o2/token"
     data = {
@@ -204,17 +207,27 @@ def download_document(document_id):
     )
     resp.raise_for_status()
     doc_info = resp.json()
+    compression = doc_info.get("compressionAlgorithm")
     print(f"DEBUG - Document Info: {doc_info}")
     download_url = doc_info.get("documentUrl") or doc_info.get("url")
     if not download_url:
         logger.error(f"Failed to find download URL in doc_info: {doc_info}")
         raise Exception("Download URL missing")
     
-    logger.info("Downloading content...")
+    logger.info(f"Downloading content... (compression={compression or 'NONE'})")
     content_resp = requests.get(download_url)
     content_resp.raise_for_status()
-    
-    return content_resp.content
+    content = content_resp.content
+
+    if compression == "GZIP" or is_gzip_bytes(content):
+        logger.info("Decompressing GZIP document content.")
+        try:
+            content = gzip.decompress(content)
+        except OSError as e:
+            logger.error(f"Failed to decompress document content: {e}")
+            raise
+
+    return content
 
 def upload_to_gcs(content_bytes, run_date, document_id):
     client = storage.Client(project=GCP_PROJECT)
@@ -222,7 +235,13 @@ def upload_to_gcs(content_bytes, run_date, document_id):
     blob_path = f"amazon/economics/us/run_date={run_date}/source_document_id={document_id}/part-000.json.gz"
     blob = bucket.blob(blob_path)
     
-    blob.upload_from_string(content_bytes, content_type="application/json")
+    if not is_gzip_bytes(content_bytes):
+        logger.info("Content is not gzipped. Compressing before upload.")
+        content_bytes = gzip.compress(content_bytes)
+    else:
+        logger.info("Content already gzipped. Uploading as-is.")
+
+    blob.upload_from_string(content_bytes, content_type="application/gzip")
     logger.info(f"Uploaded to gs://{GCS_BUCKET}/{blob_path}")
     return f"gs://{GCS_BUCKET}/{blob_path}"
 
@@ -324,8 +343,8 @@ def log_etl_run(run_date, status, query_id, doc_id, row_count, error_msg=None):
 
 
 def run_pipeline(backfill_days=7):
-    end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=backfill_days)
+    end_date = datetime.now(timezone.utc).date() - timedelta(days=1)
+    start_date = end_date - timedelta(days=backfill_days - 1)
     
     logger.info(f"Starting pipeline for range {start_date} to {end_date}")
     

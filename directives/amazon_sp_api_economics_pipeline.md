@@ -9,6 +9,20 @@ Ingest and analyze Amazon Seller Economics data using the SP-API Data Kiosk to p
 - **Granularity**: SKU-Day
 - **Marketplace**: US Only
 
+## Implementation (Script)
+- **Primary script**: `execution/ingest_amazon_economics.py`
+- **Run (default 7-day backfill)**: `python execution/ingest_amazon_economics.py --backfill-days 7`
+
+### Required environment variables
+- **Amazon SP-API**: `SP_API_REFRESH_TOKEN`, `SP_API_CLIENT_ID`, `SP_API_CLIENT_SECRET`, `SP_API_AWS_ACCESS_KEY`, `SP_API_AWS_SECRET_KEY`
+- **Optional**: `SP_API_REGION` (default `us-east-1`)
+- **Google Cloud**: `GOOGLE_CLOUD_PROJECT`, `BIGQUERY_DATASET` (default `amazon_econ`), `GCS_BUCKET`
+
+### Outputs
+- **Bronze (GCS)**: `gs://$GCS_BUCKET/amazon/economics/us/run_date=YYYY-MM-DD/source_document_id=<id>/part-000.json.gz`
+- **Silver (BigQuery)**: `${GOOGLE_CLOUD_PROJECT}.${BIGQUERY_DATASET}.fact_sku_day_us`
+- **Ops logging (BigQuery)**: `${GOOGLE_CLOUD_PROJECT}.${BIGQUERY_DATASET}.etl_runs`
+
 ## Architecture Overview
 The pipeline follows a "Bronze -> Silver" pattern to decouple ingestion from analysis and handle schema changes gracefully.
 
@@ -79,5 +93,9 @@ Pipeline **must** fail or alert if these conditions are not met.
 
 ### Drift Checks (Alerting)
 - **Sales Trend**: `SUM(net_sales)` vs 14-day median. Alert on significant deviation.
-- **Fee Ratio**: `SUM(amazon_fees) / SUM(net_sales)`. Alert if ratio spikes (indicates miscategoriztion or fee hike).
+- **Fee Ratio**: `SUM(amazon_fees) / SUM(net_sales)`. Alert if ratio spikes (indicates miscategorization or fee hike).
 - **Ad Spend**: Compare `SUM(ad_spend)` to daily budget expectations.
+
+## Smoke test
+- Start the API/dashboard: `python run_dashboard.py`
+- Verify Amazon net proceeds is present: `python execution/verify_net_proceeds.py`
