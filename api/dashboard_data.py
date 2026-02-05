@@ -555,6 +555,16 @@ def serve_js(filename):
     return send_from_directory(PROJECT_ROOT / 'dashboard' / 'js', filename)
 
 if __name__ == '__main__':
+    import webbrowser
+    import os
+    from threading import Timer
+
+    def open_browser():
+        webbrowser.open_new('http://localhost:5000/')
+
+    if not os.environ.get("WERKZEUG_RUN_MAIN"):
+        Timer(1.5, open_browser).start()
+
     print("\n" + "="*60)
     print("Dashboard available at: http://localhost:5000")
     print("API endpoint: http://localhost:5000/api/dashboard")
