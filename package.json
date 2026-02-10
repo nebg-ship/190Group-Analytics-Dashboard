@@ -1,5 +1,11 @@
 {
   "dependencies": {
     "xlsx": "^0.18.5"
+  },
+  "scripts": {
+    "convex:mcp": "npx convex mcp start"
+  },
+  "devDependencies": {
+    "convex": "^1.31.7"
   }
 }
