@@ -47,7 +47,7 @@ def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
         WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
-          AND o.order_status_id NOT IN (0, 3, 5, 6)
+          AND o.order_status_id IN (2, 10)
           AND p.sku IS NOT NULL AND p.sku != ''
           AND NOT (LOWER(p.sku) LIKE 'web%' OR LOWER(p.sku) LIKE 'tweb%')
         GROUP BY 1, 2
@@ -82,7 +82,7 @@ def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=
             JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
             JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
             WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
-              AND o.order_status_id NOT IN (0, 3, 5, 6)
+              AND o.order_status_id IN (2, 10)
               AND p.sku = @sku
         """
         compare_config = bigquery.QueryJobConfig(
@@ -112,7 +112,7 @@ def get_dashboard_data():
             customer_id,
             MIN(order_created_date_time) as first_order_date
           FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
-          WHERE order_status_id NOT IN (0, 3, 5, 6)
+          WHERE order_status_id IN (2, 10)
           GROUP BY 1
         ),
         bonsai_weekly_types AS (
@@ -124,7 +124,7 @@ def get_dashboard_data():
           FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order` o
           JOIN bonsai_customers c ON o.customer_id = c.customer_id
           WHERE DATE(o.order_created_date_time) >= '2025-01-01'
-            AND o.order_status_id NOT IN (0, 3, 5, 6)
+            AND o.order_status_id IN (2, 10)
           GROUP BY 1, 2
         ),
         bonsai_weekly AS (
@@ -133,13 +133,13 @@ def get_dashboard_data():
             GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), YEAR)) as week_start,
             EXTRACT(YEAR FROM DATE(order_created_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders,
-            ROUND(SUM(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as total_revenue,
-            ROUND(AVG(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as avg_order_value,
+            ROUND(SUM(CAST(total_excluding_tax AS FLOAT64)), 2) as total_revenue,
+            ROUND(AVG(CAST(total_excluding_tax AS FLOAT64)), 2) as avg_order_value,
             COUNT(DISTINCT customer_id) as unique_customers
           FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
           WHERE DATE(order_created_date_time) >= '2025-01-01'
-            -- Exclude: 0 (Incomplete), 3 (Partially Shipped), 5 (Cancelled), 6 (Declined)
-            AND order_status_id NOT IN (0, 3, 5, 6)
+            -- Only include: 2 (Shipped) and 10 (Completed)
+            AND order_status_id IN (2, 10)
           GROUP BY week_start, year
         ),
         amazon_weekly AS (
@@ -240,11 +240,11 @@ def get_dashboard_data():
             GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), YEAR)) as week_start,
             EXTRACT(YEAR FROM DATE(order_created_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders,
-            ROUND(SUM(CAST(sub_total_excluding_tax AS FLOAT64)), 2) as total_revenue
+            ROUND(SUM(IF(order_status_id IN (2, 10), CAST(sub_total_excluding_tax AS FLOAT64), 0)), 2) as total_revenue,
+            ROUND(SUM(IF(order_status_id IN (8, 11), CAST(sub_total_excluding_tax AS FLOAT64), 0)), 2) as future_revenue
           FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order`
           WHERE DATE(order_created_date_time) >= '2025-01-01'
-            -- Exclude: 0 (Incomplete), 3 (Partially Shipped), 5 (Cancelled), 6 (Declined)
-            AND order_status_id NOT IN (0, 3, 5, 6)
+            AND order_status_id NOT IN (0, 5, 6)
           GROUP BY 1, 2
         ),
         google_ads_weekly AS (
@@ -296,6 +296,7 @@ def get_dashboard_data():
           ROUND((COALESCE(a.net_proceeds, 0) / NULLIF(COALESCE(a.total_sales, 0), 0)) * 100, 2) as amazon_margin_pct,
           COALESCE(wh.total_orders, 0) as wholesale_orders,
           COALESCE(wh.total_revenue, 0) as wholesale_revenue,
+          COALESCE(wh.future_revenue, 0) as wholesale_future_revenue,
           ROUND(SAFE_DIVIDE(COALESCE(CAST(wh.total_revenue AS FLOAT64)), NULLIF(COALESCE(wh.total_orders, 0), 0)), 2) as wholesale_aov,
           COALESCE(a.total_ad_spend, 0) as amazon_ad_spend,
           COALESCE(gads.total_ad_spend, 0) as google_ad_spend,
@@ -335,13 +336,14 @@ def get_dashboard_data():
             COALESCE(NULLIF(ba.company, ''), ba.full_name) as company_name,
             STRING_AGG(DISTINCT ba.full_name, ', ') as customer_name,
             COUNT(DISTINCT o.order_id) as total_orders,
-            ROUND(SUM(CAST(o.sub_total_excluding_tax AS FLOAT64)), 2) as total_revenue
+            ROUND(SUM(IF(o.order_status_id IN (2, 10), CAST(o.sub_total_excluding_tax AS FLOAT64), 0)), 2) as total_revenue,
+            ROUND(SUM(IF(o.order_status_id IN (8, 11), CAST(o.sub_total_excluding_tax AS FLOAT64), 0)), 2) as future_revenue
         FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order` o
         LEFT JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order_billing_addresses` ba ON o.order_id = ba.order_id
         WHERE DATE(o.order_created_date_time) >= '2026-01-01'
-            AND o.order_status_id NOT IN (0, 3, 5, 6)
+            AND o.order_status_id NOT IN (0, 5, 6)
         GROUP BY 1
-        ORDER BY total_revenue DESC
+        ORDER BY (total_revenue + future_revenue) DESC
         LIMIT 20
         """
         customer_job = client.query(customer_query)
@@ -384,7 +386,7 @@ def query_top_skus_by_channel(client, start_date, end_date):
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
         WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
-          AND o.order_status_id NOT IN (0, 3, 5, 6)
+          AND o.order_status_id IN (2, 10)
           AND p.sku IS NOT NULL AND p.sku != ''
           AND NOT (LOWER(p.sku) LIKE 'web%' OR LOWER(p.sku) LIKE 'tweb%')
         GROUP BY 1, 2, 3
@@ -497,7 +499,7 @@ def query_sku_variations(client, product_id, start_date, end_date):
               SELECT 1 FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order` o 
               WHERE o.order_id = li.order_id 
                 AND DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
-                AND o.order_status_id NOT IN (0, 3, 5, 6)
+                AND o.order_status_id IN (2, 10)
           )
         GROUP BY 1, 2
         ORDER BY revenue DESC

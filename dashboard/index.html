@@ -195,8 +195,8 @@
                                     <th>GM%</th>
                                     <th>Order Share</th>
                                     <th>Revenue Change</th>
-                                    <th>Returns%</th>
-                                    <th>Fulfillment SLA</th>
+                                    <th>Ad Spend</th>
+                                    <th>MER / Pending</th>
                                 </tr>
                             </thead>
                             <tbody id="channelEfficiencyBody"></tbody>
@@ -248,6 +248,34 @@
                     </div>
                     <div class="sku-list" id="topBonsaiSkusList">
                         <div class="panel-placeholder">Loading top SKUs...</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="layout-row">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Top Wholesale Customers</h3>
+                        <span class="card-subtitle">Revenue (Shipped/Completed) vs Future (Awaiting
+                            Fulfillment/Pickup)</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Customer / Company</th>
+                                    <th>Orders</th>
+                                    <th>Confirmed Revenue</th>
+                                    <th>Future Revenue</th>
+                                    <th>Total Expected</th>
+                                </tr>
+                            </thead>
+                            <tbody id="wholesaleCustomersBody">
+                                <tr>
+                                    <td colspan="5" class="panel-placeholder">Loading wholesale data...</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </section>

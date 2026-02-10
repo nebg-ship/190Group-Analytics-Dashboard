@@ -13,6 +13,10 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google.cloud import bigquery
 import pandas as pd
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configuration
 PROPERTY_ID = os.getenv("GA4_PROPERTY_ID")
@@ -22,7 +26,11 @@ TABLE_ID = os.getenv("GA4_HISTORICAL_TABLE", "ga4_historical_summary")
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service-account.json")
 
 def get_client():
-    return BetaAnalyticsDataClient.from_service_account_json(SERVICE_ACCOUNT_FILE)
+    """
+    Returns a GA4 Data client using Application Default Credentials (ADC).
+    To use this locally, run: gcloud auth application-default login
+    """
+    return BetaAnalyticsDataClient()
 
 def fetch_ga4_data(start_date, end_date):
     print(f"Fetching GA4 metrics from {start_date} to {end_date}...")
@@ -74,8 +82,11 @@ def upload_to_bigquery(df):
 
 def main():
     try:
-        # Backfill the entire year of 2025 to cover any gaps in the BigQuery export
-        df = fetch_ga4_data("2025-01-01", "2025-12-31")
+        # Backfill from the start of 2025 to yesterday to ensure all data is current
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        print(f"Starting backfill from 2025-01-01 to {yesterday}...")
+        
+        df = fetch_ga4_data("2025-01-01", yesterday)
         upload_to_bigquery(df)
         print("\nBackfill process finished successfully.")
     except Exception as e:

@@ -10,6 +10,7 @@ let currentAlerts = [];
 let latestMetrics = null;
 let topSkuData = null;
 let topSkuRequestKey = null;
+let wholesaleCustomersData = [];
 const topSkuCache = new Map();
 
 const uiState = {
@@ -210,6 +211,7 @@ async function loadDashboardData() {
 
         if (result.success && Array.isArray(result.data) && result.data.length > 0) {
             dashboardData = result.data;
+            wholesaleCustomersData = result.wholesale_customers || [];
             updateLastUpdated(result.timestamp);
             updateDashboard();
             loadingOverlay.style.display = 'none';
@@ -248,6 +250,7 @@ function updateDashboard() {
     updateTopSkusChannelData(filteredData);
     renderAlerts(metrics);
     renderPanelBreakdown(metrics);
+    renderWholesaleCustomers(wholesaleCustomersData);
 }
 
 function updateTopSkusChannelData(filteredData) {
@@ -308,6 +311,32 @@ function renderSkuList(containerId, items) {
                     <div class="sku-units">${units} units</div>
                 </div>
             </div>
+        `;
+    }).join('');
+}
+
+function renderWholesaleCustomers(customers) {
+    const tbody = document.getElementById('wholesaleCustomersBody');
+    if (!tbody) return;
+
+    if (!customers || customers.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="panel-placeholder">No wholesale data for this period</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = customers.map(c => {
+        const confirmed = c.total_revenue || 0;
+        const future = c.future_revenue || 0;
+        const total = confirmed + future;
+
+        return `
+            <tr>
+                <td><strong>${c.company_name || 'Individual'}</strong><br><small>${c.customer_name}</small></td>
+                <td>${c.total_orders}</td>
+                <td class="positive">${formatCurrency(confirmed)}</td>
+                <td class="info">${formatCurrency(future)}</td>
+                <td style="font-weight: bold">${formatCurrency(total)}</td>
+            </tr>
         `;
     }).join('');
 }
@@ -504,6 +533,7 @@ function computeTotals(data) {
         totalAdSpend,
         amazonAdSpend: sum(data, 'amazon_ad_spend'),
         googleAdSpend: sum(data, 'google_ad_spend'),
+        wholesaleFutureRevenue: sum(data, 'wholesale_future_revenue'),
         mer: totalAdSpend > 0 ? totalRevenue / totalAdSpend : 0,
         bonsaiCvr: bonsaiSessions > 0 ? (bonsaiOrders / bonsaiSessions) * 100 : 0,
         amazonCvr: amazonSessions > 0 ? (amazonOrders / amazonSessions) * 100 : 0,
@@ -528,6 +558,7 @@ function computeTotals(data) {
                 name: 'Wholesale',
                 revenue: wholesaleRevenue,
                 orders: wholesaleOrders,
+                futureRevenue: sum(data, 'wholesale_future_revenue'),
                 profit: null,
                 gmPct: null
             }
@@ -752,7 +783,7 @@ function renderChannelEfficiencyTable(metrics) {
             <td>${formatPercent(orderShare)}</td>
             <td>${formatSignedCurrency(revenueChange)}</td>
             <td>${channel.name === 'Amazon' ? formatCurrency(metrics.currentTotals.amazonAdSpend || 0) : (channel.name === 'Online Storefront' ? formatCurrency(metrics.currentTotals.googleAdSpend || 0) : 'N/A')}</td>
-            <td>${channel.name === 'Amazon' ? (metrics.currentTotals.amazonAdSpend > 0 ? (channel.revenue / metrics.currentTotals.amazonAdSpend).toFixed(1) + 'x' : '0x') : (channel.name === 'Online Storefront' ? (metrics.currentTotals.googleAdSpend > 0 ? (channel.revenue / metrics.currentTotals.googleAdSpend).toFixed(1) + 'x' : '0x') : 'N/A')}</td>
+            <td>${channel.name === 'Amazon' ? (metrics.currentTotals.amazonAdSpend > 0 ? (channel.revenue / metrics.currentTotals.amazonAdSpend).toFixed(1) + 'x' : '0x') : (channel.name === 'Online Storefront' ? (metrics.currentTotals.googleAdSpend > 0 ? (channel.revenue / metrics.currentTotals.googleAdSpend).toFixed(1) + 'x' : '0x') : (channel.name === 'Wholesale' ? '+' + formatCurrency(channel.futureRevenue || 0) + ' Pending' : 'N/A'))}</td>
         `;
         tbody.appendChild(row);
     });
