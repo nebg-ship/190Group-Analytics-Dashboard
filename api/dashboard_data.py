@@ -256,6 +256,63 @@ def get_dashboard_data():
           WHERE segments_date >= '2025-01-01'
           GROUP BY 1, 2
         ),
+        -- COGS: Bonsai channel - use base_cost_price from BigCommerce line items
+        -- Falls back to dim_sku_costs_us lookup when base_cost_price is 0
+        bonsai_cogs_weekly AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(o.order_created_date_time)) as year,
+            ROUND(SUM(
+              CASE
+                WHEN CAST(li.base_cost_price AS FLOAT64) > 0 THEN CAST(li.base_cost_price AS FLOAT64) * li.quantity
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * li.quantity
+                ELSE 0
+              END
+            ), 2) as total_cogs
+          FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order_line_items` li
+          JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
+          JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c ON UPPER(p.sku) = UPPER(c.msku)
+          WHERE DATE(o.order_created_date_time) >= '2025-01-01'
+            AND o.order_status_id IN (2, 10, 11, 3)
+          GROUP BY 1, 2
+        ),
+        -- COGS: Amazon channel - join daily SKU data with cost lookup
+        amazon_cogs_weekly AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(a.business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(a.business_date), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(a.business_date)) as year,
+            ROUND(SUM(
+              CASE
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * a.units
+                ELSE 0
+              END
+            ), 2) as total_cogs
+          FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_sku_day_us` a
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c ON UPPER(a.msku) = UPPER(c.msku)
+          WHERE a.business_date >= '2025-01-01'
+          GROUP BY 1, 2
+        ),
+        -- COGS: Wholesale channel - use BigCommerce line items from wholesale dataset
+        wholesale_cogs_weekly AS (
+          SELECT
+            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), YEAR)) as week_start,
+            EXTRACT(YEAR FROM DATE(o.order_created_date_time)) as year,
+            ROUND(SUM(
+              CASE
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * li.quantity
+                WHEN CAST(li.base_cost_price AS FLOAT64) > 0 THEN CAST(li.base_cost_price AS FLOAT64) * li.quantity
+                ELSE 0
+              END
+            ), 2) as total_cogs
+          FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order_line_items` li
+          JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order` o ON li.order_id = o.order_id
+          LEFT JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_product` p ON li.product_id = p.product_id
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c ON UPPER(p.sku) = UPPER(c.msku)
+          WHERE DATE(o.order_created_date_time) >= '2025-01-01'
+            AND o.order_status_id NOT IN (0, 5, 6)
+          GROUP BY 1, 2
+        ),
         weeks AS (
           SELECT week_start, year FROM bonsai_weekly
           UNION DISTINCT
@@ -270,6 +327,12 @@ def get_dashboard_data():
           SELECT week_start, year FROM wholesale_weekly
           UNION DISTINCT
           SELECT week_start, year FROM google_ads_weekly
+          UNION DISTINCT
+          SELECT week_start, year FROM bonsai_cogs_weekly
+          UNION DISTINCT
+          SELECT week_start, year FROM amazon_cogs_weekly
+          UNION DISTINCT
+          SELECT week_start, year FROM wholesale_cogs_weekly
         )
         SELECT 
           FORMAT_DATE('%Y-%m-%d', w.week_start) as week_start,
@@ -302,7 +365,15 @@ def get_dashboard_data():
           COALESCE(gads.total_ad_spend, 0) as google_ad_spend,
           ROUND(COALESCE(a.total_ad_spend, 0) + COALESCE(gads.total_ad_spend, 0), 2) as total_ad_spend,
           ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.total_sales, 0) + COALESCE(wh.total_revenue, 0), 2) as total_company_revenue,
-          ROUND(COALESCE(b.total_revenue, 0) + COALESCE(a.net_proceeds, 0) + COALESCE(wh.total_revenue, 0), 2) as estimated_company_profit
+          COALESCE(bc.total_cogs, 0) as bonsai_cogs,
+          COALESCE(ac.total_cogs, 0) as amazon_cogs,
+          COALESCE(wc.total_cogs, 0) as wholesale_cogs,
+          ROUND(COALESCE(bc.total_cogs, 0) + COALESCE(ac.total_cogs, 0) + COALESCE(wc.total_cogs, 0), 2) as total_cogs,
+          ROUND(
+            (COALESCE(b.total_revenue, 0) - COALESCE(bc.total_cogs, 0)) +
+            (COALESCE(a.net_proceeds, 0) - COALESCE(ac.total_cogs, 0)) +
+            (COALESCE(wh.total_revenue, 0) - COALESCE(wc.total_cogs, 0)),
+          2) as estimated_company_profit
         FROM weeks w
         LEFT JOIN bonsai_weekly b ON w.week_start = b.week_start AND w.year = b.year
         LEFT JOIN bonsai_weekly_types bt ON w.week_start = bt.week_start AND w.year = bt.year
@@ -312,6 +383,9 @@ def get_dashboard_data():
         LEFT JOIN amazon_orders_weekly ao ON w.week_start = ao.week_start AND w.year = ao.year
         LEFT JOIN wholesale_weekly wh ON w.week_start = wh.week_start AND w.year = wh.year
         LEFT JOIN google_ads_weekly gads ON w.week_start = gads.week_start AND w.year = gads.year
+        LEFT JOIN bonsai_cogs_weekly bc ON w.week_start = bc.week_start AND w.year = bc.year
+        LEFT JOIN amazon_cogs_weekly ac ON w.week_start = ac.week_start AND w.year = ac.year
+        LEFT JOIN wholesale_cogs_weekly wc ON w.week_start = wc.week_start AND w.year = wc.year
         ORDER BY w.week_start DESC
         LIMIT 100
         """

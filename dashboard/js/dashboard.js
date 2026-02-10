@@ -511,6 +511,17 @@ function computeTotals(data) {
     const totalRevenue = sum(data, 'total_company_revenue');
     const estimatedProfit = sum(data, 'estimated_company_profit');
 
+    // COGS data per channel
+    const bonsaiCogs = sum(data, 'bonsai_cogs');
+    const amazonCogs = sum(data, 'amazon_cogs');
+    const wholesaleCogs = sum(data, 'wholesale_cogs');
+    const totalCogs = sum(data, 'total_cogs');
+
+    // Per-channel gross profit (revenue - COGS)
+    const bonsaiProfit = bonsaiRevenue - bonsaiCogs;
+    const amazonProfit = amazonNet - amazonCogs; // Amazon uses net proceeds (after fees) minus COGS
+    const wholesaleProfit = wholesaleRevenue - wholesaleCogs;
+
     const bonsaiSessions = sum(data, 'bonsai_sessions');
     const amazonSessions = sum(data, 'amazon_sessions');
     const totalAdSpend = sum(data, 'total_ad_spend');
@@ -526,6 +537,10 @@ function computeTotals(data) {
         totalOrders,
         totalRevenue,
         estimatedProfit,
+        totalCogs,
+        bonsaiCogs,
+        amazonCogs,
+        wholesaleCogs,
         amazonUnits: sum(data, 'amazon_units'),
         bonsaiSessions,
         amazonSessions,
@@ -546,23 +561,26 @@ function computeTotals(data) {
                 name: 'Online Storefront',
                 revenue: bonsaiRevenue,
                 orders: bonsaiOrders,
-                profit: null,
-                gmPct: null
+                cogs: bonsaiCogs,
+                profit: bonsaiProfit,
+                gmPct: bonsaiRevenue > 0 ? (bonsaiProfit / bonsaiRevenue) * 100 : null
             },
             amazon: {
                 name: 'Amazon',
                 revenue: amazonRevenue,
                 orders: amazonOrders,
-                profit: amazonNet,
-                gmPct: amazonRevenue > 0 ? (amazonNet / amazonRevenue) * 100 : null
+                cogs: amazonCogs,
+                profit: amazonProfit,
+                gmPct: amazonRevenue > 0 ? (amazonProfit / amazonRevenue) * 100 : null
             },
             wholesale: {
                 name: 'Wholesale',
                 revenue: wholesaleRevenue,
                 orders: wholesaleOrders,
                 futureRevenue: sum(data, 'wholesale_future_revenue'),
-                profit: null,
-                gmPct: null
+                cogs: wholesaleCogs,
+                profit: wholesaleProfit,
+                gmPct: wholesaleRevenue > 0 ? (wholesaleProfit / wholesaleRevenue) * 100 : null
             }
         }
     };
@@ -574,8 +592,8 @@ function computeSelectedMetrics(totals, channel) {
             return {
                 total_revenue: null,
                 net_revenue: totals.amazonRevenue,
-                gross_profit: totals.amazonNet,
-                contribution_margin: totals.amazonRevenue > 0 ? (totals.amazonNet / totals.amazonRevenue) * 100 : null,
+                gross_profit: totals.channels.amazon.profit,
+                contribution_margin: totals.channels.amazon.gmPct,
                 orders: totals.amazonOrders,
                 aov: totals.amazonOrders > 0 ? totals.amazonRevenue / totals.amazonOrders : 0,
                 units: totals.amazonUnits,
@@ -587,8 +605,8 @@ function computeSelectedMetrics(totals, channel) {
             return {
                 total_revenue: null,
                 net_revenue: totals.bonsaiRevenue,
-                gross_profit: null,
-                contribution_margin: null,
+                gross_profit: totals.channels.bonsai.profit,
+                contribution_margin: totals.channels.bonsai.gmPct,
                 orders: totals.bonsaiOrders,
                 aov: totals.bonsaiOrders > 0 ? totals.bonsaiRevenue / totals.bonsaiOrders : 0,
                 units: null,
@@ -598,8 +616,8 @@ function computeSelectedMetrics(totals, channel) {
             return {
                 total_revenue: (totals.wholesaleRevenue || 0) + (totals.wholesaleFutureRevenue || 0),
                 net_revenue: totals.wholesaleRevenue,
-                gross_profit: null,
-                contribution_margin: null,
+                gross_profit: totals.channels.wholesale.profit,
+                contribution_margin: totals.channels.wholesale.gmPct,
                 orders: totals.wholesaleOrders,
                 aov: totals.wholesaleOrders > 0 ? totals.wholesaleRevenue / totals.wholesaleOrders : 0,
                 units: null,
