@@ -25,6 +25,7 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
+    color: inherit;
 }
 
 body {
@@ -302,6 +303,7 @@ body {
     font-size: 1.75rem;
     font-weight: 700;
     margin-bottom: 0.3rem;
+    color: #ffffff;
 }
 
 .kpi-meta {
@@ -405,6 +407,7 @@ canvas {
     border-bottom: 1px solid var(--border);
     text-align: left;
     white-space: nowrap;
+    color: var(--text-primary);
 }
 
 .data-table th {
@@ -475,6 +478,7 @@ canvas {
 
 .driver-value {
     font-weight: 600;
+    color: var(--text-primary);
 }
 
 /* Alerts */
@@ -507,6 +511,7 @@ canvas {
 .alert-title {
     font-weight: 600;
     margin-bottom: 0.25rem;
+    color: var(--text-primary);
 }
 
 .alert-detail {
@@ -621,6 +626,7 @@ canvas {
     font-size: 0.9rem;
     padding: 0.5rem 0;
     border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    color: var(--text-primary);
 }
 
 .panel-item.note-item {

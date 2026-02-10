@@ -31,7 +31,9 @@ const uiState = {
 };
 
 const KPI_CONFIG = {
+    total_revenue: { valueId: 'kpiTotalRevenue', metaId: 'kpiTotalRevenueMeta', format: 'currency' },
     net_revenue: { valueId: 'kpiNetRevenue', metaId: 'kpiNetRevenueMeta', format: 'currency' },
+    future_revenue: { valueId: 'kpiFutureRevenue', metaId: 'kpiFutureRevenueMeta', format: 'currency' },
     gross_profit: { valueId: 'kpiGrossProfit', metaId: 'kpiGrossProfitMeta', format: 'currency' },
     contribution_margin: { valueId: 'kpiContributionMargin', metaId: 'kpiContributionMarginMeta', format: 'percent', deltaFormat: 'pp' },
     orders: { valueId: 'kpiOrders', metaId: 'kpiOrdersMeta', format: 'number' },
@@ -570,6 +572,7 @@ function computeSelectedMetrics(totals, channel) {
     switch (channel) {
         case 'amazon':
             return {
+                total_revenue: null,
                 net_revenue: totals.amazonRevenue,
                 gross_profit: totals.amazonNet,
                 contribution_margin: totals.amazonRevenue > 0 ? (totals.amazonNet / totals.amazonRevenue) * 100 : null,
@@ -577,25 +580,30 @@ function computeSelectedMetrics(totals, channel) {
                 aov: totals.amazonOrders > 0 ? totals.amazonRevenue / totals.amazonOrders : 0,
                 units: totals.amazonUnits,
                 marketing_spend: totals.totalAdSpend,
-                mer: totals.mer
+                mer: totals.mer,
+                future_revenue: null
             };
         case 'bonsai':
             return {
+                total_revenue: null,
                 net_revenue: totals.bonsaiRevenue,
                 gross_profit: null,
                 contribution_margin: null,
                 orders: totals.bonsaiOrders,
                 aov: totals.bonsaiOrders > 0 ? totals.bonsaiRevenue / totals.bonsaiOrders : 0,
-                units: null
+                units: null,
+                future_revenue: null
             };
         case 'wholesale':
             return {
+                total_revenue: (totals.wholesaleRevenue || 0) + (totals.wholesaleFutureRevenue || 0),
                 net_revenue: totals.wholesaleRevenue,
                 gross_profit: null,
                 contribution_margin: null,
                 orders: totals.wholesaleOrders,
                 aov: totals.wholesaleOrders > 0 ? totals.wholesaleRevenue / totals.wholesaleOrders : 0,
-                units: null
+                units: null,
+                future_revenue: totals.wholesaleFutureRevenue
             };
         case 'retail':
             return {
@@ -609,6 +617,7 @@ function computeSelectedMetrics(totals, channel) {
         case 'all':
         default:
             return {
+                total_revenue: null,
                 net_revenue: totals.totalRevenue,
                 gross_profit: totals.estimatedProfit,
                 contribution_margin: totals.contributionMargin,
@@ -616,7 +625,8 @@ function computeSelectedMetrics(totals, channel) {
                 aov: totals.aov,
                 units: totals.amazonUnits,
                 marketing_spend: totals.totalAdSpend,
-                mer: totals.mer
+                mer: totals.mer,
+                future_revenue: null
             };
     }
 }
@@ -629,19 +639,16 @@ function renderKpis(metrics, state) {
         const currentValue = metrics.selected[key];
         const previousValue = metrics.selectedPrev[key];
 
-        if (config.placeholder) {
-            valueEl.textContent = config.placeholder;
-            metaEl.textContent = '--';
-            metaEl.className = 'kpi-meta';
-            return;
-        }
-
+        const tile = valueEl.closest('.kpi-tile');
         if (currentValue === null || currentValue === undefined) {
+            tile.classList.add('hidden');
             valueEl.textContent = 'N/A';
             metaEl.textContent = '--';
             metaEl.className = 'kpi-meta';
             return;
         }
+
+        tile.classList.remove('hidden');
 
         valueEl.textContent = formatValue(currentValue, config.format);
 

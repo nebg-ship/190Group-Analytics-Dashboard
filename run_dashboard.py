@@ -31,7 +31,7 @@ def main():
     # Start Flask server
     sys.path.insert(0, str(project_root / 'api'))
     from dashboard_data import app
-    app.run(debug=True, port=5000, use_reloader=False)
+    app.run(debug=True, port=5000, use_reloader=True)
 
 if __name__ == '__main__':
     main()

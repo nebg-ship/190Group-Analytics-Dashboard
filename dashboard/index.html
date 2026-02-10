@@ -115,13 +115,29 @@
 
         <main class="overview">
             <section class="kpi-grid">
+                <button class="kpi-tile" data-metric="total_revenue">
+                    <div class="kpi-label"
+                        data-tooltip="Total expected revenue (Net Revenue + Future/Pending Wholesale Revenue).">
+                        Total Revenue
+                    </div>
+                    <div class="kpi-value" id="kpiTotalRevenue">$0</div>
+                    <div class="kpi-meta" id="kpiTotalRevenueMeta">--</div>
+                </button>
                 <button class="kpi-tile" data-metric="net_revenue">
                     <div class="kpi-label"
-                        data-tooltip="Sum of online storefront, Amazon, and wholesale revenue (or selected channel) for the period.">
+                        data-tooltip="Sum of online storefront, Amazon, and shipped/completed wholesale revenue.">
                         Net Revenue
                     </div>
                     <div class="kpi-value" id="kpiNetRevenue">$0</div>
                     <div class="kpi-meta" id="kpiNetRevenueMeta">--</div>
+                </button>
+                <button class="kpi-tile" data-metric="future_revenue">
+                    <div class="kpi-label"
+                        data-tooltip="Wholesale orders in Awaiting Fulfillment or Awaiting Pickup status.">
+                        Future Revenue
+                    </div>
+                    <div class="kpi-value" id="kpiFutureRevenue">$0</div>
+                    <div class="kpi-meta" id="kpiFutureRevenueMeta">--</div>
                 </button>
                 <button class="kpi-tile" data-metric="gross_profit">
                     <div class="kpi-label"

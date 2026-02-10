@@ -47,7 +47,7 @@ def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
         WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
-          AND o.order_status_id IN (2, 10)
+          AND o.order_status_id IN (2, 10, 11, 3)
           AND p.sku IS NOT NULL AND p.sku != ''
           AND NOT (LOWER(p.sku) LIKE 'web%' OR LOWER(p.sku) LIKE 'tweb%')
         GROUP BY 1, 2
@@ -82,7 +82,7 @@ def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=
             JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
             JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
             WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
-              AND o.order_status_id IN (2, 10)
+              AND o.order_status_id IN (2, 10, 11, 3)
               AND p.sku = @sku
         """
         compare_config = bigquery.QueryJobConfig(
@@ -112,7 +112,7 @@ def get_dashboard_data():
             customer_id,
             MIN(order_created_date_time) as first_order_date
           FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
-          WHERE order_status_id IN (2, 10)
+          WHERE order_status_id IN (2, 10, 11, 3)
           GROUP BY 1
         ),
         bonsai_weekly_types AS (
@@ -124,7 +124,7 @@ def get_dashboard_data():
           FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order` o
           JOIN bonsai_customers c ON o.customer_id = c.customer_id
           WHERE DATE(o.order_created_date_time) >= '2025-01-01'
-            AND o.order_status_id IN (2, 10)
+            AND o.order_status_id IN (2, 10, 11, 3)
           GROUP BY 1, 2
         ),
         bonsai_weekly AS (
@@ -138,8 +138,8 @@ def get_dashboard_data():
             COUNT(DISTINCT customer_id) as unique_customers
           FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
           WHERE DATE(order_created_date_time) >= '2025-01-01'
-            -- Only include: 2 (Shipped) and 10 (Completed)
-            AND order_status_id IN (2, 10)
+            -- Include: 2 (Shipped), 10 (Completed), 11 (Awaiting Fulfillment), 3 (Partially Shipped)
+            AND order_status_id IN (2, 10, 11, 3)
           GROUP BY week_start, year
         ),
         amazon_weekly AS (
@@ -386,7 +386,7 @@ def query_top_skus_by_channel(client, start_date, end_date):
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
         JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
         WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
-          AND o.order_status_id IN (2, 10)
+          AND o.order_status_id IN (2, 10, 11, 3)
           AND p.sku IS NOT NULL AND p.sku != ''
           AND NOT (LOWER(p.sku) LIKE 'web%' OR LOWER(p.sku) LIKE 'tweb%')
         GROUP BY 1, 2, 3
