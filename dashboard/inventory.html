@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>190 Group - Inventory Operations</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/css/inventory.css">
+</head>
+
+<body>
+    <div class="inventory-shell">
+        <header class="topbar">
+            <div class="brand-block">
+                <div class="brand-mark">190</div>
+                <div>
+                    <h1>Inventory Operations</h1>
+                    <p>Employee updates + QuickBooks sync visibility</p>
+                </div>
+            </div>
+            <nav class="nav-links">
+                <a href="/">Executive Overview</a>
+                <a href="/inventory" class="active">Inventory Ops</a>
+            </nav>
+        </header>
+
+        <section class="summary-grid">
+            <article class="metric-card">
+                <span class="metric-label">SKUs Visible</span>
+                <strong id="metricSkus">0</strong>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">Low Stock</span>
+                <strong id="metricLowStock">0</strong>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">QB Pending</span>
+                <strong id="metricPending">0</strong>
+            </article>
+            <article class="metric-card danger">
+                <span class="metric-label">QB Errors</span>
+                <strong id="metricErrors">0</strong>
+            </article>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <h2>Filters</h2>
+                <p>Search inventory and scope by location.</p>
+            </div>
+            <form id="filterForm" class="form-grid four">
+                <label>
+                    Search SKU or description
+                    <input id="searchInput" type="text" placeholder="e.g. WEB1234">
+                </label>
+                <label>
+                    Location
+                    <select id="filterLocation">
+                        <option value="">All locations</option>
+                    </select>
+                </label>
+                <label>
+                    Rows per page
+                    <select id="rowLimit">
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="250" selected>250</option>
+                        <option value="500">500</option>
+                    </select>
+                </label>
+                <label class="checkbox-label">
+                    <input id="includeInactive" type="checkbox">
+                    Include inactive SKUs
+                </label>
+                <div class="button-row">
+                    <button type="submit" class="btn primary">Apply</button>
+                    <button type="button" class="btn" id="refreshAllBtn">Refresh All</button>
+                </div>
+            </form>
+            <p id="statusBanner" class="status-banner">Ready.</p>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <h2>Batch 4 Security</h2>
+                <p id="securityConfigLine">Loading security policy...</p>
+            </div>
+            <form id="authForm" class="form-grid four">
+                <label>
+                    Write token
+                    <input id="authWriteToken" type="password" placeholder="Optional write token">
+                </label>
+                <label>
+                    Admin token
+                    <input id="authAdminToken" type="password" placeholder="Optional admin token">
+                </label>
+                <label>
+                    Actor / user ID
+                    <input id="authActor" type="text" placeholder="employee@190group">
+                </label>
+                <label class="checkbox-label">
+                    <input id="authPersist" type="checkbox" checked>
+                    Persist in browser localStorage
+                </label>
+                <div class="button-row">
+                    <button type="submit" class="btn primary">Save Auth</button>
+                    <button type="button" class="btn" id="clearAuthBtn">Clear</button>
+                </div>
+            </form>
+        </section>
+
+        <section class="layout two-col">
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>Inventory Overview</h2>
+                    <p>Click a SKU to open item detail.</p>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>SKU</th>
+                                <th>Description</th>
+                                <th>Income Account</th>
+                                <th>On Hand</th>
+                                <th>Available</th>
+                                <th>Reorder</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="inventoryTableBody"></tbody>
+                    </table>
+                </div>
+                <div class="table-pagination">
+                    <p id="inventoryCountInfo" class="table-count-info">No rows loaded.</p>
+                    <div class="pagination-controls">
+                        <button type="button" class="tiny-btn" id="inventoryPrevPage">Previous</button>
+                        <span id="inventoryPageInfo" class="page-info">Page 1 of 1</span>
+                        <button type="button" class="tiny-btn" id="inventoryNextPage">Next</button>
+                    </div>
+                </div>
+            </article>
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>QuickBooks Queue</h2>
+                    <p>Realtime queue status from Convex sync events.</p>
+                </div>
+                <div class="queue-counts" id="queueCounts"></div>
+                <div class="table-wrap compact">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Event</th>
+                                <th>Type</th>
+                                <th>QB Status</th>
+                                <th>Retries</th>
+                                <th>Error</th>
+                            </tr>
+                        </thead>
+                        <tbody id="queueRecentBody"></tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <section class="layout two-col">
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>Create Transfer</h2>
+                    <p>Moves inventory between locations and queues QB transfer.</p>
+                </div>
+                <form id="transferForm" class="form-grid">
+                    <label>
+                        Effective date
+                        <input id="transferDate" type="date" required>
+                    </label>
+                    <label>
+                        Created by
+                        <input id="transferCreatedBy" type="text" placeholder="employee@190group">
+                    </label>
+                    <label>
+                        From location
+                        <select id="transferFromLocation" required></select>
+                    </label>
+                    <label>
+                        To location
+                        <select id="transferToLocation" required></select>
+                    </label>
+                    <label>
+                        SKU
+                        <input id="transferSku" type="text" required>
+                    </label>
+                    <label>
+                        Quantity
+                        <input id="transferQty" type="number" min="0.0001" step="0.0001" required>
+                    </label>
+                    <label class="wide">
+                        Memo
+                        <input id="transferMemo" type="text" placeholder="Transfer note">
+                    </label>
+                    <div class="button-row">
+                        <button type="submit" class="btn primary">Create Transfer</button>
+                    </div>
+                </form>
+            </article>
+
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>Create Adjustment</h2>
+                    <p>Apply count correction and queue QB adjustment.</p>
+                </div>
+                <form id="adjustmentForm" class="form-grid">
+                    <label>
+                        Effective date
+                        <input id="adjustmentDate" type="date" required>
+                    </label>
+                    <label>
+                        Created by
+                        <input id="adjustmentCreatedBy" type="text" placeholder="employee@190group">
+                    </label>
+                    <label>
+                        Location
+                        <select id="adjustmentLocation" required></select>
+                    </label>
+                    <label>
+                        Mode
+                        <select id="adjustmentMode" required>
+                            <option value="delta">Delta (+/-)</option>
+                            <option value="set">Set Quantity</option>
+                        </select>
+                    </label>
+                    <label>
+                        SKU
+                        <input id="adjustmentSku" type="text" required>
+                    </label>
+                    <label>
+                        <span id="adjustmentValueLabel">Quantity delta</span>
+                        <input id="adjustmentValue" type="number" step="0.0001" required>
+                    </label>
+                    <label>
+                        Reason code
+                        <input id="adjustmentReasonCode" type="text" placeholder="cycle_count">
+                    </label>
+                    <label class="wide">
+                        Memo
+                        <input id="adjustmentMemo" type="text" placeholder="Adjustment note">
+                    </label>
+                    <div class="button-row">
+                        <button type="submit" class="btn primary">Create Adjustment</button>
+                    </div>
+                </form>
+            </article>
+        </section>
+
+        <section class="layout two-col">
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>Add / Update Location</h2>
+                    <p>Manage Convex + QuickBooks site mapping.</p>
+                </div>
+                <form id="locationForm" class="form-grid">
+                    <label>
+                        Location code
+                        <input id="locationCode" type="text" placeholder="BELLINGHAM" required>
+                    </label>
+                    <label>
+                        Display name
+                        <input id="locationDisplayName" type="text" placeholder="Bellingham" required>
+                    </label>
+                    <label>
+                        QuickBooks site name
+                        <input id="locationQbSiteName" type="text" placeholder="Bellingham">
+                    </label>
+                    <label>
+                        QuickBooks site list ID
+                        <input id="locationQbSiteListId" type="text" placeholder="80000001-...">
+                    </label>
+                    <label class="checkbox-label">
+                        <input id="locationActive" type="checkbox" checked>
+                        Active
+                    </label>
+                    <label class="checkbox-label">
+                        <input id="locationVirtual" type="checkbox">
+                        Virtual site
+                    </label>
+                    <div class="button-row">
+                        <button type="submit" class="btn primary">Save Location</button>
+                    </div>
+                </form>
+            </article>
+
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>Recent Events</h2>
+                    <p>Retry failures and void eligible records.</p>
+                </div>
+                <div class="table-wrap compact">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Event</th>
+                                <th>Date</th>
+                                <th>Type</th>
+                                <th>QB Status</th>
+                                <th>By</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="eventsBody"></tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <h2>Item Detail</h2>
+                <p id="itemDetailCaption">Select a SKU from the inventory table.</p>
+            </div>
+            <div id="itemDetailContent" class="item-detail empty">No SKU selected.</div>
+        </section>
+
+        <section class="layout two-col">
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>Approval Requests</h2>
+                    <p>Review queued high-risk inventory actions.</p>
+                </div>
+                <div class="button-row">
+                    <button type="button" class="btn" id="refreshApprovalsBtn">Refresh Approvals</button>
+                </div>
+                <div class="table-wrap compact">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Request</th>
+                                <th>Action</th>
+                                <th>Status</th>
+                                <th>Requested By</th>
+                                <th>Reason</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="approvalsBody"></tbody>
+                    </table>
+                </div>
+            </article>
+
+            <article class="panel">
+                <div class="panel-header">
+                    <h2>Audit Log</h2>
+                    <p>Recent API actions and outcomes.</p>
+                </div>
+                <div class="button-row">
+                    <button type="button" class="btn" id="refreshAuditBtn">Refresh Audit</button>
+                </div>
+                <div class="table-wrap compact">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Actor</th>
+                                <th>Action</th>
+                                <th>Outcome</th>
+                            </tr>
+                        </thead>
+                        <tbody id="auditBody"></tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+    </div>
+
+    <script src="/js/inventory.js"></script>
+</body>
+
+</html>

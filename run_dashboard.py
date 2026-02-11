@@ -17,7 +17,7 @@ def main():
     print("=" * 60)
     print()
     print("Starting Flask API server...")
-    print("Dashboard will open automatically in your browser.")
+    print("Executive and Inventory dashboards will be available in your browser.")
     print()
     print("Press Ctrl+C to stop the server.")
     print("=" * 60)

@@ -28,8 +28,23 @@ See `dashboard_plan.md` for the current architecture decisions and near-term bac
 ## Run the dashboard
 
 - `python run_dashboard.py`
-  - Dashboard: `http://localhost:5000`
+  - Executive Dashboard: `http://localhost:5000`
+  - Inventory Ops Dashboard: `http://localhost:5000/inventory`
   - API: `http://localhost:5000/api/dashboard`
+
+## Inventory security (Batch 4)
+
+Optional env vars for inventory write controls:
+- `INVENTORY_WRITE_TOKEN` (required header: `X-Inventory-Token`)
+- `INVENTORY_ADMIN_TOKEN` (required header: `X-Inventory-Admin-Token`)
+- `INVENTORY_REQUIRE_APPROVAL=true`
+- `INVENTORY_APPROVAL_QTY_THRESHOLD=25`
+
+Generate tokens/snippet:
+- `python execution/generate_inventory_security_tokens.py`
+
+Unified cutover validator:
+- `python execution/validate_cutover_ready.py --generate-qwc`
 
 ## Pipelines (SOP → script)
 

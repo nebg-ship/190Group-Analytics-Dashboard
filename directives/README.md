@@ -15,3 +15,6 @@ Directives are the “what to do” layer: goals, inputs, scripts to run, output
 
 - Reporting rules + mappings: `business_rules.md`
 
+## Inventory + QuickBooks
+
+- Inventory + QuickBooks sync operations: `inventory_qb_sync.md`

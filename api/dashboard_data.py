@@ -8,12 +8,14 @@ from google.cloud import bigquery
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from pathlib import Path
+from inventory_api import inventory_api
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+app.register_blueprint(inventory_api)
 
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -619,6 +621,11 @@ def get_sku_variations():
 def serve_dashboard():
     """Serve the main dashboard HTML"""
     return send_from_directory(PROJECT_ROOT / 'dashboard', 'index.html')
+
+@app.route('/inventory')
+def serve_inventory_dashboard():
+    """Serve the inventory operations dashboard HTML"""
+    return send_from_directory(PROJECT_ROOT / 'dashboard', 'inventory.html')
 
 @app.route('/css/<path:filename>')
 def serve_css(filename):

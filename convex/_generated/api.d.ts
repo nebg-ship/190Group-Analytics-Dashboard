@@ -9,6 +9,8 @@
  */
 
 import type * as functions from "../functions.js";
+import type * as inventory from "../inventory.js";
+import type * as qb_queue from "../qb_queue.js";
 
 import type {
   ApiFromModules,
@@ -18,6 +20,8 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   functions: typeof functions;
+  inventory: typeof inventory;
+  qb_queue: typeof qb_queue;
 }>;
 
 /**
