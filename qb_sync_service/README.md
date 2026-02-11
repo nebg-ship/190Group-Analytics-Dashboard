@@ -11,6 +11,22 @@ QuickBooks Web Connector middleware that:
 python execution/start_qbwc_service.py
 ```
 
+## No-admin autostart (Windows user logon)
+Install per-user startup launcher:
+```bash
+python execution/install_no_admin_autostart.py
+```
+
+Manual run (same action as startup launcher):
+```bash
+python execution/start_qbwc_stack.py
+```
+
+Remove launcher:
+```bash
+python execution/install_no_admin_autostart.py --remove
+```
+
 ## Validate live host
 Run a full preflight (env, optional QWC generation, service health, QBWC SOAP calls):
 ```bash
@@ -29,9 +45,11 @@ Outputs:
 - `QBWC_USERNAME`
 - `QBWC_PASSWORD`
 - `QBWC_APP_URL` (for `.qwc` generation)
+- `QBWC_CERT_URL` (optional; defaults to scheme+host from `QBWC_APP_URL`)
 
 Recommended:
 - `CONVEX_ENV_FILE` only when you need explicit deployment selection
+- `CONVEX_RUN_PROD=true` on production QB host
 - `QBWC_BIND_PORT=8085`
 - `QB_ADJUSTMENT_ACCOUNT_DEFAULT=Inventory Adjustments`
 

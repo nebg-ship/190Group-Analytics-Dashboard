@@ -319,6 +319,32 @@ def run_batch2_checks(
                     else:
                         details = "empty payload returned (no pending events is valid)"
                     results.append(CheckResult("batch2", "soap_sendRequestXML", True, details))
+
+                    last_error_xml = soap_envelope(
+                        "getLastError",
+                        f"<ticket>{ticket}</ticket>",
+                    )
+                    last_error_response = soap_post(soap_url, last_error_xml, timeout_seconds=20)
+                    last_error = parse_first_text(last_error_response, "getLastErrorResult")
+                    clean_last_error = (last_error or "").strip()
+                    if clean_last_error and clean_last_error != "No error recorded.":
+                        results.append(
+                            CheckResult(
+                                "batch2",
+                                "soap_getLastError",
+                                False,
+                                clean_last_error,
+                            )
+                        )
+                    else:
+                        results.append(
+                            CheckResult(
+                                "batch2",
+                                "soap_getLastError",
+                                True,
+                                "No error recorded.",
+                            )
+                        )
             except Exception as exc:  # noqa: BLE001
                 results.append(CheckResult("batch2", "soap_calls", False, str(exc)))
         else:

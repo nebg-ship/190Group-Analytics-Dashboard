@@ -97,6 +97,9 @@ def _convex_command(function_name: str, args_obj: dict[str, Any]) -> list[str]:
     env_file = os.getenv("CONVEX_ENV_FILE", "").strip()
     if env_file:
         cmd.extend(["--env-file", env_file])
+    run_prod = os.getenv("CONVEX_RUN_PROD", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if run_prod:
+        cmd.append("--prod")
     cmd.extend([function_name, json.dumps(args_obj)])
 
     if os.name == "nt":

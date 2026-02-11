@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 from xml.sax.saxutils import escape
 
 from dotenv import load_dotenv
@@ -26,6 +27,11 @@ def main() -> None:
     load_dotenv()
 
     app_url = required("QBWC_APP_URL")
+    parsed = urlsplit(app_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError("QBWC_APP_URL must be a valid absolute URL.")
+    default_cert_url = f"{parsed.scheme}://{parsed.netloc}"
+    cert_url = os.getenv("QBWC_CERT_URL", default_cert_url).strip()
     app_name = os.getenv("QBWC_APP_NAME", "190 Group QB Sync").strip()
     app_description = os.getenv(
         "QBWC_APP_DESCRIPTION",
@@ -47,6 +53,7 @@ def main() -> None:
         f"  <AppName>{escape(app_name)}</AppName>\n"
         f"  <AppID></AppID>\n"
         f"  <AppURL>{escape(app_url)}</AppURL>\n"
+        f"  <CertURL>{escape(cert_url)}</CertURL>\n"
         f"  <AppDescription>{escape(app_description)}</AppDescription>\n"
         f"  <AppSupport>{escape(app_support)}</AppSupport>\n"
         f"  <UserName>{escape(username)}</UserName>\n"
@@ -68,4 +75,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -234,6 +234,24 @@ def check_auth_and_send_request(soap_url: str, username: str, password: str) -> 
         else:
             details = "empty payload returned (no pending events is valid)"
         results.append(CheckResult("soap_sendRequestXML", True, details))
+
+        last_error_xml = soap_envelope(
+            "getLastError",
+            f"<ticket>{ticket}</ticket>",
+        )
+        last_error_response = soap_post(soap_url, last_error_xml, timeout_seconds=20)
+        last_error = parse_first_text(last_error_response, "getLastErrorResult")
+        clean_last_error = (last_error or "").strip()
+        if clean_last_error and clean_last_error != "No error recorded.":
+            results.append(
+                CheckResult(
+                    "soap_getLastError",
+                    False,
+                    clean_last_error,
+                )
+            )
+        else:
+            results.append(CheckResult("soap_getLastError", True, "No error recorded."))
     except Exception as exc:  # noqa: BLE001
         results.append(CheckResult("soap_qbwc_calls", False, str(exc)))
     return results
@@ -338,4 +356,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

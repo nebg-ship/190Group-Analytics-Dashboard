@@ -10,6 +10,7 @@ from typing import Any
 @dataclass
 class ConvexCliClient:
     env_file: str = ""
+    run_prod: bool = False
 
     def _command(self, function_name: str, args_obj: dict[str, Any]) -> list[str]:
         base_cmd = [
@@ -23,6 +24,8 @@ class ConvexCliClient:
         ]
         if self.env_file:
             base_cmd.extend(["--env-file", self.env_file])
+        if self.run_prod:
+            base_cmd.append("--prod")
         base_cmd.extend([function_name, json.dumps(args_obj)])
 
         if os.name == "nt":
@@ -106,4 +109,3 @@ class ConvexCliClient:
         if retryable is not None:
             payload["retryable"] = retryable
         return self.run("qb_queue:applyQbResult", payload)
-

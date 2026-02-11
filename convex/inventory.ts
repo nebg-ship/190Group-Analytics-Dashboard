@@ -852,12 +852,18 @@ export const cleanupSmokeData = mutation({
         const parts = await ctx.db.query("inventory_parts").collect();
         const locations = await ctx.db.query("inventory_locations").collect();
 
-        const smokeParts = skuPrefix ? parts.filter((part) => part.Sku.startsWith(skuPrefix)) : [];
+        const smokeParts = skuPrefix
+            ? parts.filter((part) => typeof part.Sku === "string" && part.Sku.startsWith(skuPrefix))
+            : [];
         const smokeLocations = locationCodePrefix
             ? locations.filter((location) => location.code.startsWith(locationCodePrefix))
             : [];
 
-        const smokeSkuSet = new Set(smokeParts.map((part) => part.Sku));
+        const smokeSkuSet = new Set(
+            smokeParts
+                .map((part) => (typeof part.Sku === "string" ? part.Sku : ""))
+                .filter((sku) => sku !== ""),
+        );
         const smokeLocationIdKeySet = new Set(smokeLocations.map((location) => String(location._id)));
 
         const eventIdKeys = new Set<string>();
@@ -900,7 +906,8 @@ export const cleanupSmokeData = mutation({
 
         const allLines = await ctx.db.query("inventory_event_lines").collect();
         for (const line of allLines) {
-            const lineHasSmokeSku = smokeSkuSet.has(line.sku) || (skuPrefix && line.sku.startsWith(skuPrefix));
+            const lineSku = typeof line.sku === "string" ? line.sku : "";
+            const lineHasSmokeSku = smokeSkuSet.has(lineSku) || (skuPrefix && lineSku.startsWith(skuPrefix));
             const lineHasSmokeLocation =
                 (line.locationId && smokeLocationIdKeySet.has(String(line.locationId))) ||
                 (line.fromLocationId && smokeLocationIdKeySet.has(String(line.fromLocationId))) ||
@@ -941,9 +948,13 @@ export const cleanupSmokeData = mutation({
         }
 
         for (const part of smokeParts) {
+            const sku = typeof part.Sku === "string" ? part.Sku : "";
+            if (!sku) {
+                continue;
+            }
             const balancesForSku = await ctx.db
                 .query("inventory_balances")
-                .withIndex("by_sku", (q) => q.eq("sku", part.Sku))
+                .withIndex("by_sku", (q) => q.eq("sku", sku))
                 .collect();
             for (const balance of balancesForSku) {
                 addBalanceId(balance._id);

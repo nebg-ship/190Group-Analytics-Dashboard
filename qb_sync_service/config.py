@@ -16,6 +16,7 @@ class QbSyncConfig:
     bind_host: str
     bind_port: int
     convex_env_file: str
+    convex_run_prod: bool
 
     @staticmethod
     def from_env() -> "QbSyncConfig":
@@ -33,4 +34,6 @@ class QbSyncConfig:
             bind_host=os.getenv("QBWC_BIND_HOST", "0.0.0.0").strip(),
             bind_port=int(os.getenv("QBWC_BIND_PORT", "8085").strip()),
             convex_env_file=os.getenv("CONVEX_ENV_FILE", "").strip(),
+            convex_run_prod=os.getenv("CONVEX_RUN_PROD", "").strip().lower()
+            in {"1", "true", "yes", "y", "on"},
         )

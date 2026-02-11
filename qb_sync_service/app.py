@@ -92,6 +92,17 @@ def create_app(service: QbwcService) -> Flask:
             }
         )
 
+    @app.get("/qbwc")
+    def qbwc_endpoint_health() -> Any:
+        return jsonify(
+            {
+                "ok": True,
+                "service": "qb_sync_service",
+                "endpoint": "/qbwc",
+                "method": "GET",
+            }
+        )
+
     @app.post("/qbwc")
     def qbwc_endpoint() -> Response:
         try:
@@ -166,7 +177,7 @@ def create_app(service: QbwcService) -> Flask:
 def run() -> None:
     load_dotenv()
     config = QbSyncConfig.from_env()
-    convex = ConvexCliClient(env_file=config.convex_env_file)
+    convex = ConvexCliClient(env_file=config.convex_env_file, run_prod=config.convex_run_prod)
     service = QbwcService(config=config, convex_client=convex)
     app = create_app(service)
 
@@ -179,4 +190,3 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
-
