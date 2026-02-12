@@ -53,7 +53,8 @@ function isPartActive(part: {
     if (typeof part.isActive === "boolean") {
         return part.isActive;
     }
-    return part.Active_Status.toLowerCase() === "active";
+    const activeStatus = typeof part.Active_Status === "string" ? part.Active_Status : "";
+    return activeStatus.toLowerCase() === "active";
 }
 
 async function getPartBySkuOrThrow(ctx: any, sku: string) {
@@ -438,6 +439,69 @@ export const createAdjustmentEvent = mutation({
         return {
             eventId,
             qbStatus: "pending",
+        };
+    },
+});
+
+export const enqueueQbCleanupZeroOutEvent = mutation({
+    args: {
+        effectiveDate: v.string(),
+        locationId: v.id("inventory_locations"),
+        skus: v.array(v.string()),
+        memo: v.optional(v.string()),
+        createdBy: v.optional(v.string()),
+        reasonCode: v.optional(v.string()),
+    },
+    handler: async (ctx, args) => {
+        assertIsoDate(args.effectiveDate);
+        if (!args.skus.length) {
+            throw new Error("skus must include at least one value.");
+        }
+
+        await getLocationOrThrow(ctx, args.locationId, true);
+        const uniqueSkus = Array.from(
+            new Set(
+                args.skus
+                    .map((sku) => normalizeSku(sku))
+                    .filter((sku) => sku.length > 0),
+            ),
+        );
+        if (!uniqueSkus.length) {
+            throw new Error("No non-empty SKUs were provided.");
+        }
+
+        const now = Date.now();
+        const eventId = await ctx.db.insert("inventory_events", {
+            eventType: "adjustment",
+            status: "committed",
+            effectiveDate: args.effectiveDate,
+            createdAt: now,
+            createdBy: args.createdBy,
+            memo: args.memo?.trim() || undefined,
+            qbStatus: "pending",
+            qbTxnType: "InventoryAdjustmentAdd",
+            retryCount: 0,
+            retryAt: now,
+            idempotencyKey: "__pending__",
+        });
+        await ctx.db.patch(eventId, { idempotencyKey: eventId });
+
+        const reasonCode = args.reasonCode?.trim() || undefined;
+        for (const sku of uniqueSkus) {
+            await ctx.db.insert("inventory_event_lines", {
+                eventId,
+                sku,
+                qty: 0,
+                locationId: args.locationId,
+                newQty: 0,
+                reasonCode,
+            });
+        }
+
+        return {
+            eventId,
+            qbStatus: "pending",
+            lineCount: uniqueSkus.length,
         };
     },
 });
@@ -827,6 +891,70 @@ export const listRecentEvents = query({
 
         return {
             rows,
+            generatedAt: Date.now(),
+        };
+    },
+});
+
+export const getQbCleanupCoverage = query({
+    args: {
+        createdBy: v.string(),
+        effectiveDate: v.string(),
+        locationIds: v.optional(v.array(v.id("inventory_locations"))),
+    },
+    handler: async (ctx, args) => {
+        assertIsoDate(args.effectiveDate);
+        const createdBy = args.createdBy.trim();
+        if (!createdBy) {
+            throw new Error("createdBy is required.");
+        }
+
+        const targetLocationKeys = args.locationIds
+            ? new Set(args.locationIds.map((locationId) => String(locationId)))
+            : null;
+
+        const allEvents = await ctx.db.query("inventory_events").collect();
+        const matchingEvents = allEvents.filter(
+            (event) =>
+                event.eventType === "adjustment" &&
+                event.status === "committed" &&
+                (event.createdBy ?? "") === createdBy &&
+                event.effectiveDate === args.effectiveDate,
+        );
+
+        const skuSetsByLocation = new Map<string, Set<string>>();
+        for (const event of matchingEvents) {
+            const lines = await ctx.db
+                .query("inventory_event_lines")
+                .withIndex("by_eventId", (q) => q.eq("eventId", event._id))
+                .collect();
+
+            for (const line of lines) {
+                if (line.newQty !== 0 || !line.locationId || !line.sku) {
+                    continue;
+                }
+                const locationKey = String(line.locationId);
+                if (targetLocationKeys && !targetLocationKeys.has(locationKey)) {
+                    continue;
+                }
+                let skuSet = skuSetsByLocation.get(locationKey);
+                if (!skuSet) {
+                    skuSet = new Set<string>();
+                    skuSetsByLocation.set(locationKey, skuSet);
+                }
+                skuSet.add(line.sku);
+            }
+        }
+
+        const rows = Array.from(skuSetsByLocation.entries()).map(([locationId, skus]) => ({
+            locationId,
+            queuedSkuCount: skus.size,
+            skus: Array.from(skus).sort(),
+        }));
+
+        return {
+            rows,
+            eventCount: matchingEvents.length,
             generatedAt: Date.now(),
         };
     },

@@ -16,7 +16,10 @@ import math
 import os
 import re
 import subprocess
+import time
 from typing import Any, Dict, Iterable, List
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 COLUMN_MAP = {
@@ -122,22 +125,35 @@ def chunked(items: List[Dict[str, Any]], chunk_size: int) -> Iterable[List[Dict[
 
 def parse_last_json_line(output: str) -> Dict[str, Any] | None:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
-    if not lines:
+    for line in reversed(lines):
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+
+    start = output.find("{")
+    end = output.rfind("}")
+    if start == -1 or end == -1 or end <= start:
         return None
     try:
-        return json.loads(lines[-1])
+        parsed = json.loads(output[start : end + 1])
     except json.JSONDecodeError:
         return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def run_convex_upsert_batch(
     batch: List[Dict[str, Any]],
     env_file: str | None,
     push: bool,
+    run_prod: bool,
 ) -> Dict[str, Any]:
     cmd = [
-        "npx",
-        "convex",
+        "node",
+        os.path.join(PROJECT_ROOT, "node_modules", "convex", "bin", "main.js"),
         "run",
         "--typecheck",
         "disable",
@@ -148,6 +164,8 @@ def run_convex_upsert_batch(
         cmd.append("--push")
     if env_file:
         cmd.extend(["--env-file", env_file])
+    if run_prod:
+        cmd.append("--prod")
     cmd.extend(
         [
             "inventory:upsertInventoryPartsBatch",
@@ -155,33 +173,49 @@ def run_convex_upsert_batch(
         ]
     )
 
-    result = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+        )
+        parsed = parse_last_json_line(result.stdout)
+        stderr_text = result.stderr.strip()
+        is_internal_error = "InternalServerError" in stderr_text
+
+        if result.returncode == 0 or parsed is not None:
+            if result.returncode != 0 and stderr_text:
+                print(
+                    "WARNING: Convex CLI returned non-zero after returning JSON.\n"
+                    f"CLI stderr:\n{stderr_text}"
+                )
+            if parsed is None:
+                return {"processed": len(batch), "inserted": None, "updated": None}
+            return parsed
+
+        if is_internal_error and attempt < max_attempts:
+            time.sleep(1.5 * attempt)
+            continue
+
         raise RuntimeError(
             f"Convex upsert command failed.\nCommand: {' '.join(cmd)}\n"
             f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         )
 
-    parsed = parse_last_json_line(result.stdout)
-    if parsed is None:
-        return {"processed": len(batch), "inserted": None, "updated": None}
-    return parsed
+    return {"processed": len(batch), "inserted": None, "updated": None}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Idempotently import inventory parts into Convex by SKU."
     )
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parser.add_argument(
         "--input",
         default=os.path.join(
-            project_root,
+            PROJECT_ROOT,
             "amazon_economics",
             "Master_Updated_web_accounts_v14_1 (1).csv",
         ),
@@ -208,6 +242,11 @@ def main() -> None:
         action="store_true",
         help="Parse and summarize input without calling Convex.",
     )
+    parser.add_argument(
+        "--prod",
+        action="store_true",
+        help="Run against production deployment (equivalent to `convex run --prod`).",
+    )
     args = parser.parse_args()
 
     if args.batch_size < 1:
@@ -232,6 +271,7 @@ def main() -> None:
             batch=batch,
             env_file=args.env_file,
             push=should_push,
+            run_prod=args.prod,
         )
         processed = int(result.get("processed") or len(batch))
         inserted = result.get("inserted")

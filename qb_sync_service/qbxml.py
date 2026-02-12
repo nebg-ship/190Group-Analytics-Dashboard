@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
+import uuid
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -30,11 +31,63 @@ def _memo_for_event(event: dict[str, Any]) -> str:
     return joined[:4095]
 
 
+def _normalize_account_full_name(value: str) -> str:
+    account = (value or "").strip()
+    if not account:
+        return account
+    # Normalize common artifacts from CSV/imported account names.
+    account = account.replace("Â·", "·")
+    account = account.replace("’", "'")
+    # QB inventory adjustments can reject deep COGS subaccount paths; prefer root account.
+    if ":" in account:
+        root = account.split(":", 1)[0].strip()
+        if root.lower().startswith("cog"):
+            account = root
+    return account
+
+
 def _line_item_full_name(line: dict[str, Any]) -> str:
     value = (line.get("qbItemFullName") or line.get("sku") or "").strip()
     if not value:
         raise ValueError("Event line is missing qbItemFullName/sku.")
     return value
+
+
+def _qbxml_version_major(version: str) -> int:
+    token = (version or "").strip().split(".", 1)[0]
+    if token.isdigit():
+        return int(token)
+    return 13
+
+
+def _external_guid_for_event(event: dict[str, Any]) -> str:
+    source = str(event.get("idempotencyKey") or event.get("eventId") or "").strip()
+    if not source:
+        source = str(uuid.uuid4())
+    # QuickBooks expects ExternalGUID to be a valid GUID string.
+    deterministic = uuid.uuid5(uuid.NAMESPACE_URL, f"190group:{source}")
+    return "{" + str(deterministic).upper() + "}"
+
+
+def _single_site_name(
+    lines: list[dict[str, Any]],
+    field_name: str,
+    description: str,
+    *,
+    required: bool,
+) -> str:
+    names: set[str] = set()
+    for line in lines:
+        value = (line.get(field_name) or "").strip()
+        if value:
+            names.add(value)
+    if not names:
+        if required:
+            raise ValueError(f"{description} is missing from all lines.")
+        return ""
+    if len(names) > 1:
+        raise ValueError(f"{description} must be the same for all lines in a single event.")
+    return next(iter(names))
 
 
 def _build_transfer_request(event: dict[str, Any], request_id: str) -> str:
@@ -47,23 +100,28 @@ def _build_transfer_request(event: dict[str, Any], request_id: str) -> str:
     if not txn_date:
         raise ValueError("Transfer event missing effectiveDate.")
 
+    from_site = _single_site_name(
+        lines,
+        "fromSiteFullName",
+        "Transfer from site mapping",
+        required=True,
+    )
+    to_site = _single_site_name(
+        lines,
+        "toSiteFullName",
+        "Transfer to site mapping",
+        required=True,
+    )
+
     line_xml: list[str] = []
     for line in lines:
         item_full_name = escape(_line_item_full_name(line))
-        from_site = (line.get("fromSiteFullName") or "").strip()
-        to_site = (line.get("toSiteFullName") or "").strip()
-        if not from_site or not to_site:
-            raise ValueError(
-                f"Transfer line for SKU {line.get('sku')} is missing from/to site mapping.",
-            )
         qty = _format_number(line.get("qty"))
         line_xml.append(
             (
                 "<TransferInventoryLineAdd>"
                 f"<ItemRef><FullName>{item_full_name}</FullName></ItemRef>"
-                f"<FromInventorySiteRef><FullName>{escape(from_site)}</FullName></FromInventorySiteRef>"
-                f"<ToInventorySiteRef><FullName>{escape(to_site)}</FullName></ToInventorySiteRef>"
-                f"<QuantityTransferred>{qty}</QuantityTransferred>"
+                f"<QuantityToTransfer>{qty}</QuantityToTransfer>"
                 "</TransferInventoryLineAdd>"
             )
         )
@@ -72,6 +130,8 @@ def _build_transfer_request(event: dict[str, Any], request_id: str) -> str:
         f"<TransferInventoryAddRq requestID=\"{escape(request_id)}\">"
         "<TransferInventoryAdd>"
         f"<TxnDate>{txn_date}</TxnDate>"
+        f"<FromInventorySiteRef><FullName>{escape(from_site)}</FullName></FromInventorySiteRef>"
+        f"<ToInventorySiteRef><FullName>{escape(to_site)}</FullName></ToInventorySiteRef>"
         f"<Memo>{memo}</Memo>"
         f"{''.join(line_xml)}"
         "</TransferInventoryAdd>"
@@ -83,11 +143,13 @@ def _build_adjustment_request(
     event: dict[str, Any],
     request_id: str,
     default_adjustment_account: str,
+    qbxml_version: str,
 ) -> str:
     lines = event.get("lines", [])
     if not lines:
         raise ValueError("Adjustment event has no lines.")
 
+    qbxml_major = _qbxml_version_major(qbxml_version)
     memo = escape(_memo_for_event(event))
     txn_date = escape(event.get("effectiveDate", ""))
     if not txn_date:
@@ -101,17 +163,25 @@ def _build_adjustment_request(
         ),
         default_adjustment_account.strip(),
     )
+    account_name = _normalize_account_full_name(account_name)
     if not account_name:
         raise ValueError("Adjustment event has no account mapping and no default account configured.")
+
+    site_name = _single_site_name(
+        lines,
+        "siteFullName",
+        "Adjustment site mapping",
+        required=qbxml_major >= 10,
+    )
+    site_xml = (
+        f"<InventorySiteRef><FullName>{escape(site_name)}</FullName></InventorySiteRef>"
+        if site_name and qbxml_major >= 10
+        else ""
+    )
 
     line_xml: list[str] = []
     for line in lines:
         item_full_name = escape(_line_item_full_name(line))
-        site_name = (line.get("siteFullName") or "").strip()
-        if not site_name:
-            raise ValueError(
-                f"Adjustment line for SKU {line.get('sku')} is missing site mapping.",
-            )
 
         quantity_xml = ""
         if line.get("newQty") is not None:
@@ -123,19 +193,23 @@ def _build_adjustment_request(
             (
                 "<InventoryAdjustmentLineAdd>"
                 f"<ItemRef><FullName>{item_full_name}</FullName></ItemRef>"
-                f"<InventorySiteRef><FullName>{escape(site_name)}</FullName></InventorySiteRef>"
                 f"<QuantityAdjustment>{quantity_xml}</QuantityAdjustment>"
                 "</InventoryAdjustmentLineAdd>"
             )
         )
+
+    external_guid_xml = ""
+    if _qbxml_version_major(qbxml_version) >= 9:
+        external_guid_xml = f"<ExternalGUID>{escape(_external_guid_for_event(event))}</ExternalGUID>"
 
     return (
         f"<InventoryAdjustmentAddRq requestID=\"{escape(request_id)}\">"
         "<InventoryAdjustmentAdd>"
         f"<AccountRef><FullName>{escape(account_name)}</FullName></AccountRef>"
         f"<TxnDate>{txn_date}</TxnDate>"
+        f"{site_xml}"
         f"<Memo>{memo}</Memo>"
-        f"<ExternalGUID>{escape(str(event.get('idempotencyKey') or event.get('eventId')))}</ExternalGUID>"
+        f"{external_guid_xml}"
         f"{''.join(line_xml)}"
         "</InventoryAdjustmentAdd>"
         "</InventoryAdjustmentAddRq>"
@@ -151,15 +225,24 @@ def build_qbxml_for_event(
     if not event_id:
         raise ValueError("Event is missing eventId.")
     event_type = event.get("eventType")
+    qbxml_major = _qbxml_version_major(qbxml_version)
 
     if event_type == "transfer":
+        if qbxml_major < 10:
+            raise ValueError("Transfer events require qbXML version 10.0 or higher.")
         request_xml = _build_transfer_request(event, event_id)
     elif event_type == "adjustment":
-        request_xml = _build_adjustment_request(event, event_id, default_adjustment_account)
+        request_xml = _build_adjustment_request(
+            event,
+            event_id,
+            default_adjustment_account,
+            qbxml_version,
+        )
     else:
         raise ValueError(f"Unsupported event type for qbXML: {event_type!r}")
 
     return (
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
         f"<?qbxml version=\"{escape(qbxml_version)}\"?>"
         "<QBXML>"
         "<QBXMLMsgsRq onError=\"stopOnError\">"

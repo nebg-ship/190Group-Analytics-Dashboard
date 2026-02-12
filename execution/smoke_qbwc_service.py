@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,6 +64,15 @@ class FakeConvexClient:
 
 
 def main() -> None:
+    tmp_dir = Path(PROJECT_ROOT) / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    qb_items_csv = tmp_dir / "smoke_qb_items.csv"
+    qb_items_csv.write_text(
+        "Sku,Type\n"
+        "SMOKE-SKU-TEST,Inventory Part\n",
+        encoding="utf-8",
+    )
+
     fake_event = {
         "eventId": "jh_fake_transfer_1",
         "eventType": "transfer",
@@ -96,6 +106,8 @@ def main() -> None:
         bind_host="127.0.0.1",
         bind_port=8085,
         convex_env_file="",
+        convex_run_prod=False,
+        qb_items_csv=str(qb_items_csv),
     )
     service = QbwcService(config=config, convex_client=fake_convex)
 

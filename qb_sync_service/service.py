@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
+import json
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from qb_sync_service.config import QbSyncConfig
@@ -30,11 +33,117 @@ def _parse_version(value: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def _parse_int(value: str) -> int | None:
+    token = (value or "").strip()
+    if token.isdigit():
+        return int(token)
+    return None
+
+
+def _parse_qbxml_version(value: str) -> tuple[int, int]:
+    parsed = _parse_version(value)
+    if not parsed:
+        return (13, 0)
+    major = parsed[0]
+    minor = parsed[1] if len(parsed) > 1 else 0
+    return (major, minor)
+
+
+def _resolve_qbxml_version(
+    configured_version: str,
+    requested_major: str,
+    requested_minor: str,
+) -> str:
+    cfg_major, cfg_minor = _parse_qbxml_version(configured_version)
+    req_major = _parse_int(requested_major)
+    req_minor = _parse_int(requested_minor)
+
+    if req_major is None:
+        return f"{cfg_major}.{cfg_minor}"
+
+    if req_minor is None:
+        req_minor = 0
+
+    if req_major < cfg_major:
+        return f"{req_major}.{req_minor}"
+    if req_major > cfg_major:
+        return f"{cfg_major}.{cfg_minor}"
+    return f"{cfg_major}.{min(cfg_minor, req_minor)}"
+
+
+_TYPE_COLUMN_CANDIDATES = (
+    "Type",
+    "Item Type",
+)
+
+_SKU_COLUMN_CANDIDATES = (
+    "Sku",
+    "SKU",
+    "Item",
+    "Item Name/Number",
+    "Item Name",
+    "Full Name",
+    "Name",
+)
+
+
+def _normalize_header(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _normalize_item_key(value: str) -> str:
+    return (value or "").strip().casefold()
+
+
+def _is_inventory_part(type_value: str) -> bool:
+    key = _normalize_header(type_value.strip())
+    if "inventoryassembly" in key:
+        return False
+    return "inventorypart" in key
+
+
+def _resolve_csv_column(
+    headers: list[str],
+    candidates: tuple[str, ...],
+    label: str,
+) -> str:
+    header_map = {_normalize_header(header): header for header in headers}
+    for candidate in candidates:
+        resolved = header_map.get(_normalize_header(candidate))
+        if resolved:
+            return resolved
+    raise ValueError(
+        f"Unable to find {label} column in QB export CSV. "
+        f"Headers: {headers}"
+    )
+
+
+def _line_item_candidates(line: dict[str, Any]) -> set[str]:
+    raw_values = [
+        str(line.get("qbItemFullName") or ""),
+        str(line.get("sku") or ""),
+    ]
+    candidates: set[str] = set()
+    for raw in raw_values:
+        value = raw.strip()
+        if not value:
+            continue
+        candidates.add(_normalize_item_key(value))
+        if ":" in value:
+            leaf = value.rsplit(":", 1)[1].strip()
+            if leaf:
+                candidates.add(_normalize_item_key(leaf))
+    return {item for item in candidates if item}
+
+
 class QbwcService:
     def __init__(self, config: QbSyncConfig, convex_client: ConvexCliClient):
         self.config = config
         self.convex = convex_client
         self.sessions: dict[str, SessionState] = {}
+        self._cached_qb_items_path: str = ""
+        self._cached_qb_items_mtime_ns: int = -1
+        self._cached_qb_inventory_part_keys: set[str] = set()
 
     def _session(self, ticket: str) -> SessionState:
         clean_ticket = (ticket or "").strip()
@@ -46,6 +155,137 @@ class QbwcService:
         created = SessionState(ticket=clean_ticket)
         self.sessions[clean_ticket] = created
         return created
+
+    def _persist_last_request_debug(
+        self,
+        *,
+        ticket: str,
+        event_id: str,
+        qbxml_version: str,
+        requested_major: str,
+        requested_minor: str,
+        payload: str,
+        original_line_count: int,
+        sent_line_count: int,
+        dropped_line_count: int,
+    ) -> None:
+        try:
+            tmp_dir = Path(".tmp")
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / "last_send_request_payload.xml").write_text(payload, encoding="utf-8")
+            (tmp_dir / "last_send_request_meta.json").write_text(
+                json.dumps(
+                    {
+                        "ticket": ticket,
+                        "eventId": event_id,
+                        "resolvedQbxmlVersion": qbxml_version,
+                        "requestedMajor": requested_major,
+                        "requestedMinor": requested_minor,
+                        "originalLineCount": original_line_count,
+                        "sentLineCount": sent_line_count,
+                        "droppedLineCount": dropped_line_count,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            # Never fail sync flow because local debug files cannot be written.
+            return
+
+    def _load_qb_inventory_part_keys(self) -> set[str]:
+        csv_path = Path(self.config.qb_items_csv).expanduser()
+        try:
+            resolved_path = str(csv_path.resolve())
+            stat = csv_path.stat()
+        except OSError as exc:
+            raise ValueError(
+                f"QB items CSV is not readable: {csv_path}"
+            ) from exc
+
+        if (
+            self._cached_qb_items_path == resolved_path
+            and self._cached_qb_items_mtime_ns == stat.st_mtime_ns
+            and self._cached_qb_inventory_part_keys
+        ):
+            return self._cached_qb_inventory_part_keys
+
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as infile:
+            reader = csv.DictReader(infile)
+            headers = list(reader.fieldnames or [])
+            if not headers:
+                raise ValueError(f"QB items CSV has no headers: {csv_path}")
+
+            type_col = _resolve_csv_column(headers, _TYPE_COLUMN_CANDIDATES, "item type")
+            sku_col = _resolve_csv_column(headers, _SKU_COLUMN_CANDIDATES, "sku")
+
+            keys: set[str] = set()
+            for row in reader:
+                item_type = str(row.get(type_col) or "").strip()
+                if not _is_inventory_part(item_type):
+                    continue
+
+                sku = str(row.get(sku_col) or "").strip()
+                if not sku:
+                    continue
+
+                normalized = _normalize_item_key(sku)
+                if normalized:
+                    keys.add(normalized)
+
+                if ":" in sku:
+                    leaf = sku.rsplit(":", 1)[1].strip()
+                    if leaf:
+                        keys.add(_normalize_item_key(leaf))
+
+        if not keys:
+            raise ValueError(
+                f"QB items CSV contains no Inventory Part SKUs: {csv_path}"
+            )
+
+        self._cached_qb_items_path = resolved_path
+        self._cached_qb_items_mtime_ns = stat.st_mtime_ns
+        self._cached_qb_inventory_part_keys = keys
+        return keys
+
+    def _filter_event_lines_to_qb_items(
+        self,
+        event: dict[str, Any],
+    ) -> tuple[dict[str, Any], int, int]:
+        inventory_part_keys = self._load_qb_inventory_part_keys()
+        lines = event.get("lines", [])
+        if not isinstance(lines, list):
+            return dict(event), 0, 0
+
+        filtered_lines: list[dict[str, Any]] = []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            candidates = _line_item_candidates(line)
+            if not candidates:
+                continue
+            if any(candidate in inventory_part_keys for candidate in candidates):
+                filtered_lines.append(line)
+
+        filtered_event = dict(event)
+        filtered_event["lines"] = filtered_lines
+        original_count = len(lines)
+        sent_count = len(filtered_lines)
+        dropped_count = max(original_count - sent_count, 0)
+        return filtered_event, original_count, dropped_count
+
+    def _qbwc_progress_percent(self) -> int:
+        """
+        Return QBWC progress for receiveResponseXML.
+        QBWC continues polling sendRequestXML while this is < 100.
+        """
+        try:
+            payload = self.convex.get_next_pending_event(limit=1)
+            events = payload.get("events", [])
+            return 0 if events else 100
+        except Exception:
+            return 100
 
     def server_version(self) -> str:
         return self.config.server_version
@@ -99,14 +339,44 @@ class QbwcService:
                     continue
                 try:
                     self.convex.mark_event_in_flight(event_id, session.ticket)
+                    filtered_event, original_line_count, dropped_line_count = (
+                        self._filter_event_lines_to_qb_items(event)
+                    )
+                    filtered_lines = filtered_event.get("lines", [])
+                    if not filtered_lines:
+                        self.convex.apply_qb_result(
+                            event_id=event_id,
+                            ticket=session.ticket,
+                            success=True,
+                            qb_txn_type=event.get("qbTxnType"),
+                        )
+                        session.last_error = ""
+                        continue
+
+                    qbxml_version = _resolve_qbxml_version(
+                        configured_version=self.config.qbxml_version,
+                        requested_major=_qbxml_major,
+                        requested_minor=_qbxml_minor,
+                    )
                     qbxml_request = build_qbxml_for_event(
-                        event=event,
-                        qbxml_version=self.config.qbxml_version,
+                        event=filtered_event,
+                        qbxml_version=qbxml_version,
                         default_adjustment_account=self.config.default_adjustment_account,
                     )
                     session.in_flight_event_id = event_id
-                    session.in_flight_txn_type = event.get("qbTxnType")
+                    session.in_flight_txn_type = filtered_event.get("qbTxnType")
                     session.last_request_xml = qbxml_request
+                    self._persist_last_request_debug(
+                        ticket=session.ticket,
+                        event_id=event_id,
+                        qbxml_version=qbxml_version,
+                        requested_major=_qbxml_major,
+                        requested_minor=_qbxml_minor,
+                        payload=qbxml_request,
+                        original_line_count=original_line_count,
+                        sent_line_count=len(filtered_lines),
+                        dropped_line_count=dropped_line_count,
+                    )
                     session.last_error = ""
                     return qbxml_request
                 except Exception as exc:
@@ -161,7 +431,7 @@ class QbwcService:
                     retryable=True,
                 )
                 session.last_error = error_message
-                return 100
+                return self._qbwc_progress_percent()
 
             parsed = parse_qbxml_response(response_xml or "")
             if parsed.success:
@@ -173,7 +443,7 @@ class QbwcService:
                     qb_txn_type=parsed.txn_type or session.in_flight_txn_type,
                 )
                 session.last_error = ""
-                return 100
+                return self._qbwc_progress_percent()
 
             self.convex.apply_qb_result(
                 event_id=event_id,
@@ -185,10 +455,10 @@ class QbwcService:
                 retryable=True,
             )
             session.last_error = parsed.status_message or "QuickBooks reported an error."
-            return 100
+            return self._qbwc_progress_percent()
         except Exception as exc:
             session.last_error = f"receiveResponseXML error: {exc}"
-            return 100
+            return self._qbwc_progress_percent()
         finally:
             session.in_flight_event_id = None
             session.in_flight_txn_type = None

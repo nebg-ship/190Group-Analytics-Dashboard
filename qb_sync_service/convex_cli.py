@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -13,15 +14,27 @@ class ConvexCliClient:
     run_prod: bool = False
 
     def _command(self, function_name: str, args_obj: dict[str, Any]) -> list[str]:
-        base_cmd = [
-            "npx",
-            "convex",
-            "run",
-            "--typecheck",
-            "disable",
-            "--codegen",
-            "disable",
-        ]
+        local_convex = Path(__file__).resolve().parent.parent / "node_modules" / "convex" / "bin" / "main.js"
+        if local_convex.exists():
+            base_cmd = [
+                "node",
+                str(local_convex),
+                "run",
+                "--typecheck",
+                "disable",
+                "--codegen",
+                "disable",
+            ]
+        else:
+            base_cmd = [
+                "npx",
+                "convex",
+                "run",
+                "--typecheck",
+                "disable",
+                "--codegen",
+                "disable",
+            ]
         if self.env_file:
             base_cmd.extend(["--env-file", self.env_file])
         if self.run_prod:
@@ -50,11 +63,15 @@ class ConvexCliClient:
 
     def run(self, function_name: str, args_obj: dict[str, Any]) -> dict[str, Any]:
         cmd = self._command(function_name, args_obj)
+        env = os.environ.copy()
+        # Avoid ENOSPC on C: when npm/npx needs cache writes.
+        env.setdefault("npm_config_cache", str(Path(".tmp") / "npm-cache"))
         proc = subprocess.run(
             cmd,
             check=False,
             capture_output=True,
             text=True,
+            env=env,
         )
 
         parsed = self._extract_json(proc.stdout)

@@ -40,6 +40,7 @@ class SeedConfig:
     dry_run: bool
     push_first: bool
     env_file: str | None
+    run_prod: bool
 
 
 def parse_last_json(output: str) -> dict[str, Any] | None:
@@ -64,12 +65,17 @@ def parse_last_json(output: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def convex_run(function_name: str, args_obj: dict[str, Any], *, env_file: str | None, push: bool) -> dict[str, Any]:
+def convex_run(
+    function_name: str,
+    args_obj: dict[str, Any],
+    *,
+    env_file: str | None,
+    push: bool,
+    run_prod: bool,
+) -> dict[str, Any]:
     cmd = [
-        "cmd",
-        "/c",
-        "npx",
-        "convex",
+        "node",
+        str(PROJECT_ROOT / "node_modules" / "convex" / "bin" / "main.js"),
         "run",
         "--typecheck",
         "disable",
@@ -80,6 +86,8 @@ def convex_run(function_name: str, args_obj: dict[str, Any], *, env_file: str | 
         cmd.append("--push")
     if env_file:
         cmd.extend(["--env-file", env_file])
+    if run_prod:
+        cmd.append("--prod")
     cmd.extend([function_name, json.dumps(args_obj)])
 
     proc = subprocess.run(
@@ -127,6 +135,11 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--push-first", action="store_true")
     parser.add_argument("--env-file", default=None)
+    parser.add_argument(
+        "--prod",
+        action="store_true",
+        help="Run against production deployment (equivalent to `convex run --prod`).",
+    )
     args = parser.parse_args()
 
     if args.chunk_size < 1:
@@ -145,6 +158,7 @@ def main() -> None:
         dry_run=args.dry_run,
         push_first=args.push_first,
         env_file=args.env_file,
+        run_prod=args.prod,
     )
 
     push_next = config.push_first
@@ -153,6 +167,7 @@ def main() -> None:
         {"includeInactive": True},
         env_file=config.env_file,
         push=push_next,
+        run_prod=config.run_prod,
     )
     push_next = False
 
@@ -177,6 +192,7 @@ def main() -> None:
         {"includeInactive": config.include_inactive, "limit": 20000},
         env_file=config.env_file,
         push=False,
+        run_prod=config.run_prod,
     )
     part_rows = parts_payload.get("rows", [])
     if not isinstance(part_rows, list):
@@ -260,6 +276,7 @@ def main() -> None:
                 },
                 env_file=config.env_file,
                 push=False,
+                run_prod=config.run_prod,
             )
             events_created += 1
             print(

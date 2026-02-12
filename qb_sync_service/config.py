@@ -17,6 +17,7 @@ class QbSyncConfig:
     bind_port: int
     convex_env_file: str
     convex_run_prod: bool
+    qb_items_csv: str
 
     @staticmethod
     def from_env() -> "QbSyncConfig":
@@ -36,4 +37,5 @@ class QbSyncConfig:
             convex_env_file=os.getenv("CONVEX_ENV_FILE", "").strip(),
             convex_run_prod=os.getenv("CONVEX_RUN_PROD", "").strip().lower()
             in {"1", "true", "yes", "y", "on"},
+            qb_items_csv=os.getenv("QB_ITEMS_CSV", ".tmp/qb_items_export.csv").strip(),
         )

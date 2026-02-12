@@ -108,7 +108,10 @@ export const getNextPendingQbEvent = query({
                             qty: line.qty,
                             newQty: line.newQty ?? null,
                             reasonCode: line.reasonCode ?? null,
-                            qbAccountFullName: reasonAccount?.qbAccountFullName ?? null,
+                            qbAccountFullName:
+                                reasonAccount?.qbAccountFullName ??
+                                part?.COGS_Account ??
+                                null,
                             qbItemFullName: part?.qbItemFullName ?? part?.Sku ?? line.sku,
                             qbItemListId: part?.qbItemListId ?? null,
                             fromLocationId: line.fromLocationId ?? null,
