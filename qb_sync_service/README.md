@@ -40,6 +40,7 @@ Outputs:
 ## Endpoints
 - `GET /` health JSON
 - `POST /qbwc` QBWC SOAP endpoint
+- `GET /qbwc/items-cache` live QB item-cache snapshot (add `?includeItems=0` to omit full item list)
 
 ## Required environment
 - `QBWC_USERNAME`
@@ -52,6 +53,35 @@ Recommended:
 - `CONVEX_RUN_PROD=true` on production QB host
 - `QBWC_BIND_PORT=8085`
 - `QB_ADJUSTMENT_ACCOUNT_DEFAULT=Inventory Adjustments`
+
+## QB item source mode
+Default behavior uses a CSV export to decide which items are valid inventory parts:
+- `QB_ITEMS_SOURCE=csv`
+- `QB_ITEMS_CSV=.tmp/qb_items_export.csv`
+
+Direct QuickBooks pull mode (no CSV export required):
+- `QB_ITEMS_SOURCE=qbwc`
+- Service sends `ItemInventoryQueryRq` via QBWC before processing events.
+- Retrieved item keys are cached in-memory and refreshed by:
+  - `QB_ITEMS_REFRESH_MINUTES` (default `60`; `0` means refresh only when cache is empty)
+  - `QB_ITEMS_QUERY_MAX_RETURNED` (default `1000`, per iterator page)
+  - `QB_ITEMS_QUERY_MODE`:
+    - `auto` (default): start with `ItemInventoryQueryRq`, auto-fallback on `0x80040400`
+    - `item_query_fallback`: force compatibility mode (`ItemQueryRq`) from the first request
+- Latest pulled items are also written to `.tmp/qb_items_live_from_qbwc.csv` for downstream scripts.
+
+Missing-item auto-create:
+- `QB_ITEMS_AUTO_CREATE=true` (default) enables automatic `ItemInventoryAddRq` when an event SKU is missing in QB.
+- Required mappings for auto-create can come from Convex `inventory_parts` fields, or fall back to:
+  - `QB_ITEM_INCOME_ACCOUNT_DEFAULT`
+  - `QB_ITEM_COGS_ACCOUNT_DEFAULT`
+  - `QB_ITEM_ASSET_ACCOUNT_DEFAULT`
+- If item creation succeeds (or QB returns duplicate-name `3100`), the service continues with the original event.
+
+Queue QB-only zero-outs directly from live cache (no manual QB export):
+```bash
+python execution/queue_qb_only_zero_cleanup.py --qb-items-live-url http://127.0.0.1:8085/qbwc/items-cache --prod --effective-date 2026-01-01
+```
 
 ## Production Cutover (Batch 4)
 1. Generate inventory security tokens:

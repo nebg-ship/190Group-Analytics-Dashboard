@@ -114,6 +114,26 @@ export const getNextPendingQbEvent = query({
                                 null,
                             qbItemFullName: part?.qbItemFullName ?? part?.Sku ?? line.sku,
                             qbItemListId: part?.qbItemListId ?? null,
+                            itemIncomeAccountFullName: part?.Account ?? part?.Category ?? null,
+                            itemCogsAccountFullName: part?.COGS_Account ?? null,
+                            itemAssetAccountFullName: part?.Asset_Account ?? null,
+                            itemSalesDescription: part?.Description ?? null,
+                            itemPurchaseDescription: part?.Purchase_Description ?? null,
+                            itemSalesPrice:
+                                typeof part?.Price === "number" && Number.isFinite(part.Price)
+                                    ? part.Price
+                                    : null,
+                            itemPurchaseCost:
+                                typeof part?.Cost === "number" && Number.isFinite(part.Cost)
+                                    ? part.Cost
+                                    : null,
+                            itemIsActive:
+                                typeof part?.isActive === "boolean"
+                                    ? part.isActive
+                                    : (
+                                        typeof part?.Active_Status === "string"
+                                        && part.Active_Status.toLowerCase() === "active"
+                                    ),
                             fromLocationId: line.fromLocationId ?? null,
                             fromSiteFullName: fromLocation?.qbSiteFullName ?? null,
                             toLocationId: line.toLocationId ?? null,

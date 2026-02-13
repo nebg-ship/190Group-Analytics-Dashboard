@@ -103,6 +103,18 @@ def create_app(service: QbwcService) -> Flask:
             }
         )
 
+    @app.get("/qbwc/items-cache")
+    def qbwc_items_cache() -> Any:
+        snapshot = service.qb_items_snapshot()
+        include_items = (
+            request.args.get("includeItems", "1").strip().lower()
+            in {"1", "true", "yes", "y", "on"}
+        )
+        if not include_items:
+            snapshot = dict(snapshot)
+            snapshot.pop("items", None)
+        return jsonify({"ok": True, **snapshot})
+
     @app.post("/qbwc")
     def qbwc_endpoint() -> Response:
         try:

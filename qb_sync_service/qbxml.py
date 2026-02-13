@@ -216,6 +216,112 @@ def _build_adjustment_request(
     )
 
 
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text == "":
+        return default
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_optional_decimal_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "":
+        return None
+    return _format_number(value)
+
+
+def _split_item_full_name(full_name: str) -> tuple[str, str]:
+    segments = [segment.strip() for segment in full_name.split(":") if segment.strip()]
+    if not segments:
+        raise ValueError("Item full name is empty.")
+    if len(segments) == 1:
+        return segments[0], ""
+    parent = ":".join(segments[:-1])
+    return segments[-1], parent
+
+
+def build_item_inventory_add_qbxml(
+    *,
+    item_full_name: str,
+    request_id: str,
+    qbxml_version: str,
+    income_account_full_name: str,
+    cogs_account_full_name: str,
+    asset_account_full_name: str,
+    sales_desc: str = "",
+    purchase_desc: str = "",
+    sales_price: Any = None,
+    purchase_cost: Any = None,
+    is_active: Any = True,
+) -> str:
+    clean_item_full_name = (item_full_name or "").strip()
+    if not clean_item_full_name:
+        raise ValueError("ItemInventoryAdd request is missing item_full_name.")
+
+    item_name, parent_full_name = _split_item_full_name(clean_item_full_name)
+    if not item_name:
+        raise ValueError("ItemInventoryAdd request resolved to an empty item Name.")
+
+    income_account = _normalize_account_full_name(income_account_full_name)
+    cogs_account = _normalize_account_full_name(cogs_account_full_name)
+    asset_account = _normalize_account_full_name(asset_account_full_name)
+    if not income_account:
+        raise ValueError("ItemInventoryAdd request is missing income_account_full_name.")
+    if not cogs_account:
+        raise ValueError("ItemInventoryAdd request is missing cogs_account_full_name.")
+    if not asset_account:
+        raise ValueError("ItemInventoryAdd request is missing asset_account_full_name.")
+
+    fields: list[str] = [f"<Name>{escape(item_name)}</Name>"]
+    if parent_full_name:
+        fields.append(
+            f"<ParentRef><FullName>{escape(parent_full_name)}</FullName></ParentRef>"
+        )
+    fields.append("<IsActive>true</IsActive>" if _coerce_bool(is_active, True) else "<IsActive>false</IsActive>")
+
+    clean_sales_desc = (sales_desc or "").strip()
+    if clean_sales_desc:
+        fields.append(f"<SalesDesc>{escape(clean_sales_desc)}</SalesDesc>")
+
+    sales_price_text = _coerce_optional_decimal_text(sales_price)
+    if sales_price_text is not None:
+        fields.append(f"<SalesPrice>{sales_price_text}</SalesPrice>")
+
+    fields.append(f"<IncomeAccountRef><FullName>{escape(income_account)}</FullName></IncomeAccountRef>")
+
+    clean_purchase_desc = (purchase_desc or "").strip()
+    if clean_purchase_desc:
+        fields.append(f"<PurchaseDesc>{escape(clean_purchase_desc)}</PurchaseDesc>")
+
+    purchase_cost_text = _coerce_optional_decimal_text(purchase_cost)
+    if purchase_cost_text is not None:
+        fields.append(f"<PurchaseCost>{purchase_cost_text}</PurchaseCost>")
+
+    fields.append(f"<COGSAccountRef><FullName>{escape(cogs_account)}</FullName></COGSAccountRef>")
+    fields.append(f"<AssetAccountRef><FullName>{escape(asset_account)}</FullName></AssetAccountRef>")
+
+    request_xml = (
+        f"<ItemInventoryAddRq requestID=\"{escape(request_id)}\">"
+        "<ItemInventoryAdd>"
+        f"{''.join(fields)}"
+        "</ItemInventoryAdd>"
+        "</ItemInventoryAddRq>"
+    )
+    return (
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        f"<?qbxml version=\"{escape(qbxml_version)}\"?>"
+        "<QBXML>"
+        "<QBXMLMsgsRq onError=\"stopOnError\">"
+        f"{request_xml}"
+        "</QBXMLMsgsRq>"
+        "</QBXML>"
+    )
+
+
 def build_qbxml_for_event(
     event: dict[str, Any],
     qbxml_version: str,

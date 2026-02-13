@@ -10,6 +10,7 @@ Inventory assemblies are always ignored.
 Usage:
   python execution/queue_qb_only_zero_cleanup.py --qb-items-csv path\\to\\qb_items.csv --dry-run
   python execution/queue_qb_only_zero_cleanup.py --qb-items-csv path\\to\\qb_items.csv --push-first
+  python execution/queue_qb_only_zero_cleanup.py --qb-items-live-url http://127.0.0.1:8085/qbwc/items-cache --dry-run
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib import error as url_error
+from urllib import parse as url_parse
+from urllib import request as url_request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -168,29 +172,62 @@ def load_qb_inventory_part_skus(
     if not csv_path.exists():
         raise RuntimeError(f"QB CSV not found: {csv_path}")
 
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as infile:
-        reader = csv.DictReader(infile)
-        headers = list(reader.fieldnames or [])
-        if not headers:
-            raise RuntimeError(f"QB CSV appears empty or missing headers: {csv_path}")
+    last_decode_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            with csv_path.open("r", encoding=encoding, newline="") as infile:
+                reader = csv.DictReader(infile)
+                headers = list(reader.fieldnames or [])
+                if not headers:
+                    raise RuntimeError(f"QB CSV appears empty or missing headers: {csv_path}")
 
-        resolved_type_col = resolve_column(headers, type_column, TYPE_COLUMN_CANDIDATES, "type")
-        resolved_sku_col = resolve_column(headers, sku_column, SKU_COLUMN_CANDIDATES, "sku")
+                resolved_sku_col = resolve_column(headers, sku_column, SKU_COLUMN_CANDIDATES, "sku")
+                resolved_type_col = ""
+                missing_type_column = False
+                try:
+                    resolved_type_col = resolve_column(
+                        headers,
+                        type_column,
+                        TYPE_COLUMN_CANDIDATES,
+                        "type",
+                    )
+                except RuntimeError:
+                    if type_column:
+                        raise
+                    missing_type_column = True
 
-        skus: set[str] = set()
-        for row in reader:
-            item_type = str(row.get(resolved_type_col, "") or "").strip()
-            if not item_type:
-                continue
-            if not is_inventory_part(item_type):
-                continue
+                skus: set[str] = set()
+                for row in reader:
+                    if resolved_type_col:
+                        item_type = str(row.get(resolved_type_col, "") or "").strip()
+                        if not item_type:
+                            continue
+                        if not is_inventory_part(item_type):
+                            continue
 
-            sku = str(row.get(resolved_sku_col, "") or "").strip()
-            if not sku:
-                continue
-            skus.add(sku)
+                    sku = str(row.get(resolved_sku_col, "") or "").strip()
+                    if not sku:
+                        continue
+                    skus.add(sku)
 
-    return skus, resolved_type_col, resolved_sku_col
+                if encoding != "utf-8-sig":
+                    print(f"INFO: Parsed QB CSV using fallback encoding '{encoding}'.")
+                if missing_type_column:
+                    print(
+                        "WARNING: No type column found; treating all rows in QB CSV as Inventory Part "
+                        "(expected for pre-filtered QB-only exports)."
+                    )
+                resolved_type_label = resolved_type_col or "<all_rows_assumed_inventory_part>"
+                return skus, resolved_type_label, resolved_sku_col
+        except UnicodeDecodeError as exc:
+            last_decode_error = exc
+            continue
+
+    if last_decode_error is not None:
+        raise RuntimeError(
+            f"Unable to decode QB CSV {csv_path} as utf-8-sig/cp1252/latin-1: {last_decode_error}"
+        ) from last_decode_error
+    raise RuntimeError(f"Unable to parse QB CSV: {csv_path}")
 
 
 def chunked(values: list[str], chunk_size: int) -> list[list[str]]:
@@ -215,6 +252,81 @@ def write_missing_skus(path: Path, skus: list[str]) -> None:
     path.write_text(body, encoding="utf-8")
 
 
+def _with_query_param(url: str, name: str, value: str) -> str:
+    parsed = url_parse.urlparse(url)
+    query = dict(url_parse.parse_qsl(parsed.query, keep_blank_values=True))
+    query[name] = value
+    return url_parse.urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            url_parse.urlencode(query),
+            parsed.fragment,
+        )
+    )
+
+
+def pull_qb_items_from_service(
+    service_url: str,
+    timeout_seconds: int,
+) -> tuple[list[str], dict[str, Any]]:
+    request_url = _with_query_param(service_url, "includeItems", "1")
+    req = url_request.Request(request_url, method="GET")
+    try:
+        with url_request.urlopen(req, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except url_error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        raise RuntimeError(
+            f"QB service returned HTTP {exc.code} for {request_url}: {detail}"
+        ) from exc
+    except url_error.URLError as exc:
+        raise RuntimeError(
+            f"Unable to reach QB service at {request_url}: {exc}"
+        ) from exc
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"QB service response is not valid JSON from {request_url}: {exc}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"QB service response JSON is not an object: {payload!r}")
+    if not bool(payload.get("ok")):
+        raise RuntimeError(f"QB service returned ok=false: {payload}")
+    if not bool(payload.get("cacheReady")):
+        raise RuntimeError(
+            "QB item cache is not ready yet. Run QuickBooks Web Connector update first, "
+            "then retry."
+        )
+
+    raw_items = payload.get("items", [])
+    if not isinstance(raw_items, list):
+        raise RuntimeError(f"QB service response 'items' is not a list: {type(raw_items)!r}")
+
+    cleaned_items = sorted({str(item).strip() for item in raw_items if str(item).strip()})
+    if not cleaned_items:
+        raise RuntimeError("QB service returned an empty item list.")
+    return cleaned_items, payload
+
+
+def write_qb_inventory_parts_csv(path: Path, skus: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as outfile:
+        writer = csv.writer(outfile)
+        writer.writerow(["Sku", "Type"])
+        for sku in skus:
+            writer.writerow([sku, "Inventory Part"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -224,8 +336,27 @@ def main() -> None:
     )
     parser.add_argument(
         "--qb-items-csv",
-        required=True,
+        default=None,
         help="Path to QuickBooks items export CSV.",
+    )
+    parser.add_argument(
+        "--qb-items-live-url",
+        default=None,
+        help=(
+            "Optional QB service cache endpoint (e.g. http://127.0.0.1:8085/qbwc/items-cache). "
+            "When set, script pulls live QB items and auto-writes a temp CSV."
+        ),
+    )
+    parser.add_argument(
+        "--qb-items-live-output",
+        default=".tmp/qb_items_live_from_qbwc.csv",
+        help="Where to write pulled live QB items as CSV before diffing.",
+    )
+    parser.add_argument(
+        "--qb-items-live-timeout-seconds",
+        type=int,
+        default=30,
+        help="HTTP timeout when pulling live QB items.",
     )
     parser.add_argument(
         "--type-column",
@@ -305,8 +436,34 @@ def main() -> None:
         raise RuntimeError("--effective-date must be YYYY-MM-DD")
     if args.batch_size < 1:
         raise RuntimeError("--batch-size must be >= 1")
+    if args.qb_items_live_timeout_seconds < 1:
+        raise RuntimeError("--qb-items-live-timeout-seconds must be >= 1")
 
-    qb_csv_path = Path(args.qb_items_csv)
+    qb_csv_path: Path
+    qb_source_summary: dict[str, Any]
+    if args.qb_items_live_url:
+        pulled_items, snapshot = pull_qb_items_from_service(
+            args.qb_items_live_url,
+            args.qb_items_live_timeout_seconds,
+        )
+        qb_csv_path = Path(args.qb_items_live_output)
+        write_qb_inventory_parts_csv(qb_csv_path, pulled_items)
+        qb_source_summary = {
+            "mode": "qbwc_live",
+            "serviceUrl": args.qb_items_live_url,
+            "itemCount": len(pulled_items),
+            "loadedAtEpochMs": snapshot.get("loadedAtEpochMs"),
+            "outputCsv": str(qb_csv_path),
+        }
+    elif args.qb_items_csv:
+        qb_csv_path = Path(args.qb_items_csv)
+        qb_source_summary = {
+            "mode": "csv",
+            "inputCsv": str(qb_csv_path),
+        }
+    else:
+        raise RuntimeError("Provide --qb-items-csv or --qb-items-live-url.")
+
     qb_skus, type_col, sku_col = load_qb_inventory_part_skus(
         qb_csv_path,
         args.type_column,
@@ -424,6 +581,7 @@ def main() -> None:
     remaining_pairs = sum(len(skus) for skus in remaining_by_location.values())
 
     summary = {
+        "qbItemsSource": qb_source_summary,
         "qbCsv": str(qb_csv_path),
         "resolvedColumns": {
             "type": type_col,
