@@ -582,17 +582,17 @@ export const getInventoryOverview = query({
         const activeParts = includeInactive ? parts : parts.filter(isPartActive);
         const filteredParts = search
             ? activeParts.filter(
-                  (part) =>
-                      part.Sku.toLowerCase().includes(search) ||
-                      part.Description.toLowerCase().includes(search),
-              )
+                (part) =>
+                    part.Sku.toLowerCase().includes(search) ||
+                    part.Description.toLowerCase().includes(search),
+            )
             : activeParts;
 
         const balances = args.locationId
             ? await ctx.db
-                  .query("inventory_balances")
-                  .withIndex("by_locationId", (q) => q.eq("locationId", args.locationId!))
-                  .collect()
+                .query("inventory_balances")
+                .withIndex("by_locationId", (q) => q.eq("locationId", args.locationId!))
+                .collect()
             : await ctx.db.query("inventory_balances").collect();
 
         const balanceBySku = new Map<string, { onHand: number; reserved: number; available: number }>();
@@ -791,11 +791,43 @@ export const listPartQuantities = query({
             .sort((a, b) => a.sku.localeCompare(b.sku))
             .slice(0, limit);
 
+
         return {
             rows,
             totalRows: rows.length,
             generatedAt: Date.now(),
         };
+    },
+});
+
+export const getPartQuantitiesBySkus = query({
+    args: {
+        skus: v.array(v.string()),
+    },
+    handler: async (ctx, args) => {
+        const results = [];
+
+        // We can optimize this by parallelizing the lookups since we have a list
+        const promises = args.skus.map(async (sku) => {
+            const normalized = normalizeSku(sku);
+            if (!normalized) return null;
+
+            const part = await ctx.db
+                .query("inventory_parts")
+                .withIndex("by_sku", (q) => q.eq("Sku", normalized))
+                .first();
+
+            if (part) {
+                return {
+                    sku: part.Sku,
+                    quantityOnHand2025: part.Quantity_On_Hand_2025,
+                };
+            }
+            return null;
+        });
+
+        const resolved = await Promise.all(promises);
+        return resolved.filter((r) => r !== null);
     },
 });
 
