@@ -273,10 +273,8 @@ export const applyQbResult = mutation({
         }
 
         const nextRetryCount = event.retryCount + 1;
-        const retryable =
-            args.retryable ??
-            isRetryableQbError(args.qbErrorCode) ??
-            true;
+        const requestedRetryable = args.retryable ?? true;
+        const retryable = requestedRetryable && isRetryableQbError(args.qbErrorCode);
         const shouldRetry = retryable && nextRetryCount < MAX_RETRIES;
         const retryAt = shouldRetry
             ? now + getRetryDelaySeconds(nextRetryCount) * 1000
@@ -325,6 +323,229 @@ export const retryFailedEvent = mutation({
             eventId: args.eventId,
             qbStatus: "pending",
             retryAt: now,
+        };
+    },
+});
+
+export const releaseStaleInFlightEvents = mutation({
+    args: {
+        olderThanMs: v.optional(v.number()),
+        limit: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const now = Date.now();
+        const olderThanMs = Math.max(Math.floor(args.olderThanMs ?? 10 * 60 * 1000), 0);
+        const limit = Math.min(Math.max(Math.floor(args.limit ?? 50), 1), 500);
+        const cutoff = now - olderThanMs;
+
+        const inFlightEvents = await ctx.db
+            .query("inventory_events")
+            .withIndex("by_qbStatus", (q) => q.eq("qbStatus", "in_flight"))
+            .collect();
+
+        const staleEvents = inFlightEvents
+            .filter((event) => (event.qbLastAttemptAt ?? event.createdAt) <= cutoff)
+            .slice(0, limit);
+
+        for (const event of staleEvents) {
+            await ctx.db.patch(event._id, {
+                qbStatus: "pending",
+                retryAt: now,
+            });
+        }
+
+        const staleEventIds = staleEvents.map((event) => event._id);
+        if (staleEventIds.length > 0) {
+            const sessions = await ctx.db
+                .query("qb_sync_sessions")
+                .withIndex("by_inFlightEventId")
+                .collect();
+            for (const session of sessions) {
+                if (session.inFlightEventId && staleEventIds.includes(session.inFlightEventId)) {
+                    await ctx.db.patch(session._id, { inFlightEventId: undefined });
+                }
+            }
+        }
+
+        return {
+            releasedCount: staleEvents.length,
+            releasedEventIds: staleEventIds,
+            cutoff,
+            now,
+        };
+    },
+});
+
+export const remapCleanupSkusAndRetry = mutation({
+    args: {
+        createdBy: v.optional(v.string()),
+        fromTo: v.array(
+            v.object({
+                fromSku: v.string(),
+                toSku: v.string(),
+            }),
+        ),
+        statuses: v.optional(v.array(v.string())),
+    },
+    handler: async (ctx, args) => {
+        const createdBy = (args.createdBy ?? "qb-pre-sync-cleanup").trim();
+        if (!createdBy) {
+            throw new Error("createdBy cannot be empty.");
+        }
+        if (!args.fromTo.length) {
+            throw new Error("fromTo must include at least one remap pair.");
+        }
+
+        const remap = new Map<string, string>();
+        for (const pair of args.fromTo) {
+            const fromSku = pair.fromSku.trim();
+            const toSku = pair.toSku.trim();
+            if (!fromSku || !toSku) {
+                continue;
+            }
+            remap.set(fromSku.toLowerCase(), toSku);
+        }
+        if (!remap.size) {
+            throw new Error("No valid remap pairs provided.");
+        }
+
+        const allowedStatuses = new Set(["pending", "in_flight", "error", "not_ready", "applied"]);
+        const requestedStatuses = args.statuses?.length ? args.statuses : ["error"];
+        const statusFilter = new Set(
+            requestedStatuses
+                .map((status) => status.trim())
+                .filter((status) => allowedStatuses.has(status)),
+        );
+        if (!statusFilter.size) {
+            throw new Error("No valid statuses provided.");
+        }
+
+        const allEvents = await ctx.db.query("inventory_events").collect();
+        const candidateEvents = allEvents.filter(
+            (event) =>
+                (event.createdBy ?? "") === createdBy &&
+                statusFilter.has(event.qbStatus),
+        );
+
+        const now = Date.now();
+        const touchedEventIds: string[] = [];
+        const touchedLines: Array<{
+            eventId: string;
+            lineId: string;
+            fromSku: string;
+            toSku: string;
+        }> = [];
+        const remapCounts = new Map<string, number>();
+
+        for (const event of candidateEvents) {
+            const lines = await ctx.db
+                .query("inventory_event_lines")
+                .withIndex("by_eventId", (q) => q.eq("eventId", event._id))
+                .collect();
+
+            let eventTouched = false;
+            for (const line of lines) {
+                const currentSku = line.sku.trim();
+                if (!currentSku) {
+                    continue;
+                }
+                const mappedSku = remap.get(currentSku.toLowerCase());
+                if (!mappedSku || mappedSku === currentSku) {
+                    continue;
+                }
+
+                await ctx.db.patch(line._id, { sku: mappedSku });
+                eventTouched = true;
+                touchedLines.push({
+                    eventId: String(event._id),
+                    lineId: String(line._id),
+                    fromSku: currentSku,
+                    toSku: mappedSku,
+                });
+                const remapKey = `${currentSku}=>${mappedSku}`;
+                remapCounts.set(remapKey, (remapCounts.get(remapKey) ?? 0) + 1);
+            }
+
+            if (!eventTouched) {
+                continue;
+            }
+
+            touchedEventIds.push(String(event._id));
+            if (event.qbStatus === "error") {
+                await ctx.db.patch(event._id, {
+                    qbStatus: "pending",
+                    retryAt: now,
+                    qbErrorCode: undefined,
+                    qbErrorMessage: undefined,
+                });
+            } else if (event.qbStatus === "in_flight") {
+                await ctx.db.patch(event._id, {
+                    qbStatus: "pending",
+                    retryAt: now,
+                });
+            }
+        }
+
+        return {
+            createdBy,
+            candidateEventCount: candidateEvents.length,
+            touchedEventCount: touchedEventIds.length,
+            touchedEventIds,
+            touchedLineCount: touchedLines.length,
+            remapCounts: Array.from(remapCounts.entries()).map(([pair, count]) => ({ pair, count })),
+            touchedLines,
+            retriedAt: now,
+        };
+    },
+});
+
+export const releasePendingRetryBackoff = mutation({
+    args: {
+        createdBy: v.optional(v.string()),
+        qbErrorCode: v.optional(v.string()),
+        limit: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const now = Date.now();
+        const limit = Math.min(Math.max(Math.floor(args.limit ?? 500), 1), 5000);
+        const createdByFilter = args.createdBy?.trim();
+        const errorCodeFilter = args.qbErrorCode?.trim();
+
+        const pendingEvents = await ctx.db
+            .query("inventory_events")
+            .withIndex("by_qbStatus", (q) => q.eq("qbStatus", "pending"))
+            .collect();
+
+        const candidates = pendingEvents
+            .filter((event) => {
+                if (event.status !== "committed") {
+                    return false;
+                }
+                if ((event.retryAt ?? 0) <= now) {
+                    return false;
+                }
+                if (createdByFilter && (event.createdBy ?? "") !== createdByFilter) {
+                    return false;
+                }
+                if (errorCodeFilter && (event.qbErrorCode ?? "") !== errorCodeFilter) {
+                    return false;
+                }
+                return true;
+            })
+            .slice(0, limit);
+
+        for (const event of candidates) {
+            await ctx.db.patch(event._id, { retryAt: now });
+        }
+
+        return {
+            releasedCount: candidates.length,
+            releasedEventIds: candidates.map((event) => event._id),
+            now,
+            filters: {
+                createdBy: createdByFilter ?? null,
+                qbErrorCode: errorCodeFilter ?? null,
+            },
         };
     },
 });

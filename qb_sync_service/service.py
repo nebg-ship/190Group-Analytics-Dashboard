@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -13,7 +14,9 @@ from xml.sax.saxutils import escape
 from qb_sync_service.config import QbSyncConfig
 from qb_sync_service.convex_cli import ConvexCliClient
 from qb_sync_service.qbxml import (
+    build_account_add_qbxml,
     build_item_inventory_add_qbxml,
+    build_item_inventory_mods_qbxml,
     build_qbxml_for_event,
     parse_qbxml_response,
 )
@@ -30,8 +33,11 @@ class SessionState:
     pending_event: dict[str, Any] | None = None
     pending_event_original_line_count: int = 0
     pending_event_dropped_line_count: int = 0
+    pending_account_create_queue: list[dict[str, Any]] = field(default_factory=list)
     pending_item_create_queue: list[dict[str, Any]] = field(default_factory=list)
+    in_flight_account_create: dict[str, Any] | None = None
     in_flight_item_create: dict[str, Any] | None = None
+    known_account_keys: set[str] = field(default_factory=set)
 
 
 def _parse_version(value: str) -> tuple[int, ...]:
@@ -50,6 +56,25 @@ def _parse_int(value: str) -> int | None:
     token = (value or "").strip()
     if token.isdigit():
         return int(token)
+    return None
+
+
+def _parse_float(value: str) -> float | None:
+    token = (value or "").strip()
+    if not token:
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _parse_bool(value: str) -> bool | None:
+    token = (value or "").strip().lower()
+    if token in {"true", "1", "yes", "y"}:
+        return True
+    if token in {"false", "0", "no", "n"}:
+        return False
     return None
 
 
@@ -182,12 +207,130 @@ def _optional_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _is_duplicate_item_name_conflict(status_code: str) -> bool:
+def _extract_ref_full_name(element: ET.Element) -> str:
+    for child in element:
+        if _localname(child.tag) == "FullName":
+            text = (child.text or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _is_duplicate_name_conflict(status_code: str) -> bool:
     return (status_code or "").strip() == "3100"
+
+
+def _is_invalid_item_account_reference(status_code: str, status_message: str) -> bool:
+    if (status_code or "").strip() != "3140":
+        return False
+    message = (status_message or "").casefold()
+    return (
+        "invalid reference to quickbooks account" in message
+        and "item inventory" in message
+    )
+
+
+_ITEM_ACCOUNT_REF_REGEX = re.compile(
+    r'invalid reference to quickbooks account\s+"(.+?)"\s+in the item inventory',
+    re.IGNORECASE,
+)
+_GENERIC_ACCOUNT_REF_REGEX = re.compile(
+    r'invalid reference to quickbooks account\s+"(.+)"',
+    re.IGNORECASE,
+)
+
+
+def _normalize_account_full_name_for_compare(value: str) -> str:
+    segments = [segment.strip() for segment in str(value or "").split(":") if segment.strip()]
+    if not segments:
+        return ""
+    return ":".join(segments)
+
+
+def _normalize_account_key(value: str) -> str:
+    return _normalize_account_full_name_for_compare(value).casefold()
+
+
+def _account_path_prefixes(value: str) -> list[str]:
+    clean = _normalize_account_full_name_for_compare(value)
+    if not clean:
+        return []
+    parts = clean.split(":")
+    prefixes: list[str] = []
+    for index in range(len(parts)):
+        prefixes.append(":".join(parts[: index + 1]))
+    return prefixes
+
+
+def _extract_missing_item_account_full_name(status_message: str) -> str:
+    text = _optional_text(status_message)
+    if not text:
+        return ""
+    lowered = text.casefold()
+    prefix = 'invalid reference to quickbooks account "'
+    suffix = '" in the item inventory'
+    start = lowered.find(prefix)
+    if start != -1:
+        value_start = start + len(prefix)
+        end = lowered.find(suffix, value_start)
+        if end != -1 and end > value_start:
+            return _optional_text(text[value_start:end])
+    for pattern in (_ITEM_ACCOUNT_REF_REGEX, _GENERIC_ACCOUNT_REF_REGEX):
+        match = pattern.search(text)
+        if match:
+            return _optional_text(match.group(1))
+    return ""
+
+
+def _infer_account_type_for_missing_ref(
+    missing_account_full_name: str,
+    create_spec: dict[str, Any],
+) -> str | None:
+    missing_key = _normalize_account_key(missing_account_full_name)
+    if not missing_key:
+        return None
+
+    account_sources = (
+        ("incomeAccountFullName", "Income"),
+        ("cogsAccountFullName", "CostOfGoodsSold"),
+        ("assetAccountFullName", "OtherCurrentAsset"),
+    )
+    for field_name, account_type in account_sources:
+        source_full_name = _optional_text(create_spec.get(field_name))
+        if not source_full_name:
+            continue
+        source_prefixes = {_normalize_account_key(prefix) for prefix in _account_path_prefixes(source_full_name)}
+        if missing_key in source_prefixes:
+            return account_type
+
+    if missing_key.startswith("cog"):
+        return "CostOfGoodsSold"
+    if "inventory asset" in missing_key or missing_key.endswith("asset"):
+        return "OtherCurrentAsset"
+    return "Income"
+
+
+def _record_item_account_attempt(create_spec: dict[str, Any], account_key: str) -> bool:
+    if not account_key:
+        return False
+    raw_attempts = create_spec.get("missingAccountAttemptKeys")
+    if isinstance(raw_attempts, list):
+        attempts = raw_attempts
+    else:
+        attempts = []
+        create_spec["missingAccountAttemptKeys"] = attempts
+    if account_key in attempts:
+        return False
+    attempts.append(account_key)
+    return True
 
 
 def _is_qb_success_response(status_code: str, status_severity: str) -> bool:
     return status_code in {"0", "1"} and status_severity.lower() != "error"
+
+
+def _is_hresult_parse_error(hresult: str) -> bool:
+    return (hresult or "").strip().casefold() == "0x80040400"
 
 
 class QbwcService:
@@ -199,12 +342,15 @@ class QbwcService:
         self._cached_qb_items_mtime_ns: int = -1
         self._cached_qb_inventory_part_keys: set[str] = set()
         self._cached_qb_inventory_part_names: set[str] = set()
+        self._cached_qb_inventory_part_details: dict[str, dict[str, Any]] = {}
+        self._cached_qb_inventory_part_detail_lookup: dict[str, dict[str, Any]] = {}
         self._cached_qb_items_loaded_at_monotonic: float = 0.0
         self._cached_qb_items_loaded_at_epoch_ms: int = 0
         self._qb_items_query_in_progress: bool = False
         self._qb_items_query_iterator_id: str = ""
         self._qb_items_query_accumulator: set[str] = set()
         self._qb_items_query_name_accumulator: set[str] = set()
+        self._qb_items_query_detail_accumulator: dict[str, dict[str, Any]] = {}
         configured_mode = (self.config.qb_items_query_mode or "").strip().casefold()
         if configured_mode in {
             "itemquery",
@@ -253,12 +399,36 @@ class QbwcService:
         self._qb_items_query_iterator_id = ""
         self._qb_items_query_accumulator = set()
         self._qb_items_query_name_accumulator = set()
+        self._qb_items_query_detail_accumulator = {}
 
     def _begin_qb_items_query_cycle(self) -> None:
         self._qb_items_query_in_progress = True
         self._qb_items_query_iterator_id = ""
         self._qb_items_query_accumulator = set()
         self._qb_items_query_name_accumulator = set()
+        self._qb_items_query_detail_accumulator = {}
+
+    def _rebuild_qb_item_detail_lookup(self) -> None:
+        lookup: dict[str, dict[str, Any]] = {}
+        for detail in self._cached_qb_inventory_part_details.values():
+            full_name = _optional_text(detail.get("qbItemFullName"))
+            item_name = _optional_text(detail.get("qbItemName"))
+            for raw in (full_name, item_name):
+                if not raw:
+                    continue
+                add_item_key_variants: set[str] = set()
+                _add_item_key_variants(add_item_key_variants, raw)
+                for key in add_item_key_variants:
+                    lookup.setdefault(key, detail)
+        self._cached_qb_inventory_part_detail_lookup = lookup
+
+    def _lookup_qb_item_detail_for_line(self, line: dict[str, Any]) -> dict[str, Any] | None:
+        candidates = _line_item_candidates(line)
+        for key in candidates:
+            detail = self._cached_qb_inventory_part_detail_lookup.get(key)
+            if detail is not None:
+                return detail
+        return None
 
     def _build_qb_items_query_xml(
         self,
@@ -363,6 +533,7 @@ class QbwcService:
 
         keys: set[str] = set()
         item_names: set[str] = set()
+        item_details: dict[str, dict[str, Any]] = {}
         for element in query_rs.iter():
             local_name = _localname(element.tag)
             # In fallback mode, ItemQueryRs may include many item types.
@@ -370,6 +541,15 @@ class QbwcService:
                 continue
             full_name = ""
             name = ""
+            list_id = ""
+            edit_sequence = ""
+            is_active: bool | None = None
+            quantity_on_hand: float | None = None
+            sales_price: float | None = None
+            purchase_cost: float | None = None
+            income_account_full_name = ""
+            cogs_account_full_name = ""
+            asset_account_full_name = ""
             for child in element:
                 local = _localname(child.tag)
                 text = (child.text or "").strip()
@@ -377,6 +557,32 @@ class QbwcService:
                     full_name = text
                 elif local == "Name" and text:
                     name = text
+                elif local == "ListID" and text:
+                    list_id = text
+                elif local == "EditSequence" and text:
+                    edit_sequence = text
+                elif local == "IsActive":
+                    parsed_bool = _parse_bool(text)
+                    if parsed_bool is not None:
+                        is_active = parsed_bool
+                elif local == "QuantityOnHand":
+                    parsed_float = _parse_float(text)
+                    if parsed_float is not None:
+                        quantity_on_hand = parsed_float
+                elif local == "SalesPrice":
+                    parsed_float = _parse_float(text)
+                    if parsed_float is not None:
+                        sales_price = parsed_float
+                elif local == "PurchaseCost":
+                    parsed_float = _parse_float(text)
+                    if parsed_float is not None:
+                        purchase_cost = parsed_float
+                elif local == "IncomeAccountRef":
+                    income_account_full_name = _extract_ref_full_name(child)
+                elif local == "COGSAccountRef":
+                    cogs_account_full_name = _extract_ref_full_name(child)
+                elif local == "AssetAccountRef":
+                    asset_account_full_name = _extract_ref_full_name(child)
 
             if full_name:
                 _add_item_key_variants(keys, full_name)
@@ -384,6 +590,24 @@ class QbwcService:
             elif name:
                 _add_item_key_variants(keys, name)
                 item_names.add(name)
+
+            detail_key = (full_name or name).strip()
+            if detail_key:
+                item_details[detail_key] = {
+                    "qbItemFullName": full_name or name,
+                    "qbItemName": name or None,
+                    "qbItemListId": list_id or None,
+                    "editSequence": edit_sequence or None,
+                    "isActive": is_active,
+                    "quantityOnHand": quantity_on_hand,
+                    "salesPrice": sales_price,
+                    "purchaseCost": purchase_cost,
+                    "incomeAccountFullName": income_account_full_name or None,
+                    "cogsAccountFullName": cogs_account_full_name or None,
+                    "assetAccountFullName": asset_account_full_name or None,
+                }
+
+        self._qb_items_query_detail_accumulator.update(item_details)
 
         return keys, item_names, iterator_id, remaining_count
 
@@ -403,36 +627,76 @@ class QbwcService:
                 writer.writerow(["Sku", "Type"])
                 for name in names:
                     writer.writerow([name, "Inventory Part"])
+
+            detail_path = tmp_dir / "qb_items_live_detail_from_qbwc.csv"
+            details = sorted(
+                self._cached_qb_inventory_part_details.values(),
+                key=lambda row: str(row.get("qbItemFullName") or "").casefold(),
+            )
+            with detail_path.open("w", encoding="utf-8", newline="") as outfile:
+                fieldnames = [
+                    "qbItemFullName",
+                    "qbItemName",
+                    "qbItemListId",
+                    "editSequence",
+                    "isActive",
+                    "quantityOnHand",
+                    "salesPrice",
+                    "purchaseCost",
+                    "incomeAccountFullName",
+                    "cogsAccountFullName",
+                    "assetAccountFullName",
+                ]
+                writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in details:
+                    writer.writerow(
+                        {
+                            key: row.get(key)
+                            for key in fieldnames
+                        }
+                    )
         except Exception:
             # Never fail sync flow because cache debug files cannot be written.
             return
 
-    def qb_items_snapshot(self) -> dict[str, Any]:
+    def qb_items_snapshot(self, *, include_details: bool = False) -> dict[str, Any]:
         names = sorted(self._cached_qb_inventory_part_names)
-        return {
+        snapshot = {
             "source": self._normalized_items_source(),
             "cacheReady": bool(self._cached_qb_inventory_part_keys),
             "cacheFresh": self._qb_items_cache_is_fresh(),
             "itemCount": len(names),
+            "detailCount": len(self._cached_qb_inventory_part_details),
             "loadedAtEpochMs": self._cached_qb_items_loaded_at_epoch_ms or None,
             "queryInProgress": self._qb_items_query_in_progress,
             "queryRequestMode": self._qb_items_query_request_mode,
             "autoCreateMissingItems": self.config.qb_items_auto_create,
+            "autoCreateMissingAccounts": self.config.qb_accounts_auto_create,
             "items": names,
         }
+        if include_details:
+            snapshot["itemDetails"] = sorted(
+                self._cached_qb_inventory_part_details.values(),
+                key=lambda row: str(row.get("qbItemFullName") or "").casefold(),
+            )
+        return snapshot
 
     def _reset_in_flight_request_state(self, session: SessionState) -> None:
         session.in_flight_event_id = None
         session.in_flight_txn_type = None
         session.in_flight_request_kind = ""
         session.last_request_xml = ""
+        session.in_flight_account_create = None
         session.in_flight_item_create = None
 
     def _clear_pending_event_state(self, session: SessionState) -> None:
         session.pending_event = None
         session.pending_event_original_line_count = 0
         session.pending_event_dropped_line_count = 0
+        session.pending_account_create_queue = []
         session.pending_item_create_queue = []
+        session.in_flight_account_create = None
         session.in_flight_item_create = None
 
     def _cache_created_item_name(self, item_full_name: str) -> None:
@@ -444,6 +708,64 @@ class QbwcService:
         self._cached_qb_items_loaded_at_monotonic = time.monotonic()
         self._cached_qb_items_loaded_at_epoch_ms = int(time.time() * 1000)
         self._persist_qb_items_cache_file()
+
+    def _cache_known_account_name(self, session: SessionState, account_full_name: str) -> None:
+        key = _normalize_account_key(account_full_name)
+        if key:
+            session.known_account_keys.add(key)
+
+    def _build_missing_account_create_specs(
+        self,
+        *,
+        session: SessionState,
+        event_id: str,
+        create_spec: dict[str, Any],
+        missing_account_full_name: str,
+    ) -> list[dict[str, Any]]:
+        clean_missing_account = _normalize_account_full_name_for_compare(missing_account_full_name)
+        if not clean_missing_account:
+            return []
+
+        account_type = _infer_account_type_for_missing_ref(clean_missing_account, create_spec)
+        if not account_type:
+            return []
+
+        pending_keys = {
+            _normalize_account_key(_optional_text(spec.get("accountFullName")))
+            for spec in session.pending_account_create_queue
+        }
+        in_flight_account = _optional_text(
+            (session.in_flight_account_create or {}).get("accountFullName")
+        )
+        if in_flight_account:
+            pending_keys.add(_normalize_account_key(in_flight_account))
+
+        specs: list[dict[str, Any]] = []
+        for full_name in _account_path_prefixes(clean_missing_account):
+            account_key = _normalize_account_key(full_name)
+            if not account_key:
+                continue
+            if account_key in session.known_account_keys:
+                continue
+            if account_key in pending_keys:
+                continue
+            request_seed = (
+                f"{event_id}|account_add|"
+                f"{_optional_text(create_spec.get('itemFullName')).casefold()}|"
+                f"{account_key}|{account_type}"
+            )
+            specs.append(
+                {
+                    "eventId": event_id,
+                    "requestId": str(uuid.uuid5(uuid.NAMESPACE_URL, request_seed)),
+                    "accountFullName": full_name,
+                    "accountType": account_type,
+                    "isActive": True,
+                    "sourceItemFullName": _optional_text(create_spec.get("itemFullName")),
+                }
+            )
+            pending_keys.add(account_key)
+        return specs
 
     def _build_missing_item_create_spec(
         self,
@@ -511,11 +833,59 @@ class QbwcService:
             "isActive": line.get("itemIsActive"),
         }
 
+    def _send_next_account_create_request(
+        self,
+        session: SessionState,
+        *,
+        qbxml_version: str,
+        requested_major: str,
+        requested_minor: str,
+    ) -> str:
+        if not session.pending_account_create_queue:
+            raise ValueError("No pending account create requests for this session.")
+        if not session.pending_event:
+            raise ValueError("Pending event is required before creating missing accounts.")
+
+        create_spec = session.pending_account_create_queue.pop(0)
+        event_id = _optional_text(session.pending_event.get("eventId"))
+        if not event_id:
+            raise ValueError("Pending event is missing eventId.")
+        qbxml_request = build_account_add_qbxml(
+            account_full_name=_optional_text(create_spec.get("accountFullName")),
+            account_type=_optional_text(create_spec.get("accountType")),
+            request_id=_optional_text(create_spec.get("requestId")),
+            qbxml_version=qbxml_version,
+            is_active=create_spec.get("isActive"),
+        )
+        session.in_flight_event_id = event_id
+        session.in_flight_txn_type = _optional_text(session.pending_event.get("qbTxnType")) or None
+        session.in_flight_request_kind = "account_create"
+        session.last_request_xml = qbxml_request
+        session.in_flight_account_create = create_spec
+        session.in_flight_item_create = None
+        self._persist_last_request_debug(
+            ticket=session.ticket,
+            event_id=event_id,
+            qbxml_version=qbxml_version,
+            requested_major=requested_major,
+            requested_minor=requested_minor,
+            payload=qbxml_request,
+            original_line_count=session.pending_event_original_line_count,
+            sent_line_count=1,
+            dropped_line_count=session.pending_event_dropped_line_count,
+            request_kind="account_create",
+            item_full_name=_optional_text(create_spec.get("accountFullName")),
+        )
+        session.last_error = ""
+        return qbxml_request
+
     def _send_next_item_create_request(
         self,
         session: SessionState,
         *,
         qbxml_version: str,
+        requested_major: str,
+        requested_minor: str,
     ) -> str:
         if not session.pending_item_create_queue:
             raise ValueError("No pending item create requests for this session.")
@@ -544,8 +914,95 @@ class QbwcService:
         session.in_flight_request_kind = "item_create"
         session.last_request_xml = qbxml_request
         session.in_flight_item_create = create_spec
+        self._persist_last_request_debug(
+            ticket=session.ticket,
+            event_id=event_id,
+            qbxml_version=qbxml_version,
+            requested_major=requested_major,
+            requested_minor=requested_minor,
+            payload=qbxml_request,
+            original_line_count=session.pending_event_original_line_count,
+            sent_line_count=1,
+            dropped_line_count=session.pending_event_dropped_line_count,
+            request_kind="item_create",
+            item_full_name=_optional_text(create_spec.get("itemFullName")),
+        )
         session.last_error = ""
         return qbxml_request
+
+    def _is_item_account_sync_event(self, event: dict[str, Any]) -> bool:
+        created_by = _optional_text(event.get("createdBy")).casefold()
+        return created_by.startswith("qb-item-account-sync")
+
+    def _build_item_account_sync_request(
+        self,
+        event: dict[str, Any],
+        *,
+        qbxml_version: str,
+    ) -> tuple[str, int]:
+        lines = event.get("lines", [])
+        if not isinstance(lines, list) or not lines:
+            raise ValueError("Item account sync event has no lines.")
+
+        mods: list[dict[str, Any]] = []
+        for index, line in enumerate(lines):
+            if not isinstance(line, dict):
+                continue
+            detail = self._lookup_qb_item_detail_for_line(line)
+            if detail is None:
+                sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
+                raise ValueError(f"Missing QB item detail for account sync line: {sku}.")
+
+            list_id = _optional_text(detail.get("qbItemListId"))
+            edit_sequence = _optional_text(detail.get("editSequence"))
+            if not list_id:
+                sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
+                raise ValueError(f"QB ListID is missing for account sync item: {sku}.")
+            if not edit_sequence:
+                sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
+                raise ValueError(f"QB EditSequence is missing for account sync item: {sku}.")
+
+            income_account = (
+                _optional_text(line.get("itemIncomeAccountFullName"))
+                or _optional_text(detail.get("incomeAccountFullName"))
+            )
+            cogs_account = (
+                _optional_text(line.get("itemCogsAccountFullName"))
+                or _optional_text(detail.get("cogsAccountFullName"))
+            )
+            asset_account = (
+                _optional_text(line.get("itemAssetAccountFullName"))
+                or _optional_text(detail.get("assetAccountFullName"))
+            )
+            if not income_account:
+                sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
+                raise ValueError(f"Income account is missing for account sync item: {sku}.")
+            if not cogs_account:
+                sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
+                raise ValueError(f"COGS account is missing for account sync item: {sku}.")
+            if not asset_account:
+                sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
+                raise ValueError(f"Asset account is missing for account sync item: {sku}.")
+
+            event_id = _optional_text(event.get("eventId")) or "item_account_sync"
+            sku_key = _optional_text(line.get("sku")) or _optional_text(detail.get("qbItemFullName")) or str(index)
+            request_seed = f"{event_id}|item_mod|{sku_key.casefold()}|{index}"
+            request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, request_seed))
+
+            mods.append(
+                {
+                    "requestId": request_id,
+                    "listId": list_id,
+                    "editSequence": edit_sequence,
+                    "incomeAccountFullName": income_account,
+                    "cogsAccountFullName": cogs_account,
+                    "assetAccountFullName": asset_account,
+                }
+            )
+
+        if not mods:
+            raise ValueError("Item account sync event has no valid lines.")
+        return build_item_inventory_mods_qbxml(mods=mods, qbxml_version=qbxml_version), len(mods)
 
     def _send_event_request(
         self,
@@ -565,14 +1022,28 @@ class QbwcService:
         if not isinstance(lines, list) or not lines:
             raise ValueError(f"Event {event_id} has no lines to send.")
 
-        qbxml_request = build_qbxml_for_event(
-            event=event,
-            qbxml_version=qbxml_version,
-            default_adjustment_account=self.config.default_adjustment_account,
-        )
+        request_kind = "event"
+        if self._is_item_account_sync_event(event):
+            qbxml_request, sent_line_count = self._build_item_account_sync_request(
+                event,
+                qbxml_version=qbxml_version,
+            )
+            request_kind = "item_account_sync"
+        else:
+            qbxml_request = build_qbxml_for_event(
+                event=event,
+                qbxml_version=qbxml_version,
+                default_adjustment_account=self.config.default_adjustment_account,
+            )
+            sent_line_count = len(lines)
+
         session.in_flight_event_id = event_id
-        session.in_flight_txn_type = event.get("qbTxnType")
-        session.in_flight_request_kind = "event"
+        if request_kind == "item_account_sync":
+            session.in_flight_txn_type = "ItemInventoryMod"
+            session.in_flight_request_kind = "item_account_sync"
+        else:
+            session.in_flight_txn_type = event.get("qbTxnType")
+            session.in_flight_request_kind = "event"
         session.last_request_xml = qbxml_request
         session.in_flight_item_create = None
         self._persist_last_request_debug(
@@ -583,8 +1054,9 @@ class QbwcService:
             requested_minor=requested_minor,
             payload=qbxml_request,
             original_line_count=original_line_count,
-            sent_line_count=len(lines),
+            sent_line_count=sent_line_count,
             dropped_line_count=dropped_line_count,
+            request_kind=request_kind,
         )
         session.last_error = ""
         return qbxml_request
@@ -601,6 +1073,8 @@ class QbwcService:
         original_line_count: int,
         sent_line_count: int,
         dropped_line_count: int,
+        request_kind: str,
+        item_full_name: str = "",
     ) -> None:
         try:
             tmp_dir = Path(".tmp")
@@ -614,6 +1088,8 @@ class QbwcService:
                         "resolvedQbxmlVersion": qbxml_version,
                         "requestedMajor": requested_major,
                         "requestedMinor": requested_minor,
+                        "requestKind": request_kind,
+                        "itemFullName": item_full_name,
                         "originalLineCount": original_line_count,
                         "sentLineCount": sent_line_count,
                         "droppedLineCount": dropped_line_count,
@@ -683,6 +1159,8 @@ class QbwcService:
         self._cached_qb_items_mtime_ns = stat.st_mtime_ns
         self._cached_qb_inventory_part_keys = keys
         self._cached_qb_inventory_part_names = names
+        self._cached_qb_inventory_part_details = {}
+        self._cached_qb_inventory_part_detail_lookup = {}
         self._cached_qb_items_loaded_at_monotonic = time.monotonic()
         self._cached_qb_items_loaded_at_epoch_ms = int(time.time() * 1000)
         return keys
@@ -744,7 +1222,9 @@ class QbwcService:
         QBWC continues polling sendRequestXML while this is < 100.
         """
         try:
-            payload = self.convex.get_next_pending_event(limit=1)
+            lookahead_ms = max(self.config.qb_retry_lookahead_seconds, 0) * 1000
+            now_ms = int(time.time() * 1000) + lookahead_ms
+            payload = self.convex.get_next_pending_event(limit=1, now_ms=now_ms)
             events = payload.get("events", [])
             return 0 if events else 100
         except Exception:
@@ -799,19 +1279,33 @@ class QbwcService:
                 session.in_flight_txn_type = None
                 session.in_flight_request_kind = "item_query"
                 session.last_request_xml = qb_items_query_request
+                session.in_flight_account_create = None
                 session.in_flight_item_create = None
                 session.last_error = ""
                 return qb_items_query_request
 
-            if session.pending_item_create_queue or session.pending_event:
+            if (
+                session.pending_account_create_queue
+                or session.pending_item_create_queue
+                or session.pending_event
+            ):
                 pending_event_id = _optional_text(
                     (session.pending_event or {}).get("eventId")
                 )
                 try:
+                    if session.pending_account_create_queue:
+                        return self._send_next_account_create_request(
+                            session,
+                            qbxml_version=qbxml_version,
+                            requested_major=_qbxml_major,
+                            requested_minor=_qbxml_minor,
+                        )
                     if session.pending_item_create_queue:
                         return self._send_next_item_create_request(
                             session,
                             qbxml_version=qbxml_version,
+                            requested_major=_qbxml_major,
+                            requested_minor=_qbxml_minor,
                         )
                     if session.pending_event:
                         return self._send_event_request(
@@ -846,7 +1340,9 @@ class QbwcService:
                     session.last_error = f"sendRequestXML build error for event {pending_event_id}: {exc}"
                     return ""
 
-            payload = self.convex.get_next_pending_event(limit=10)
+            lookahead_ms = max(self.config.qb_retry_lookahead_seconds, 0) * 1000
+            now_ms = int(time.time() * 1000) + lookahead_ms
+            payload = self.convex.get_next_pending_event(limit=10, now_ms=now_ms)
             events = payload.get("events", [])
             if not events:
                 self._reset_in_flight_request_state(session)
@@ -881,10 +1377,13 @@ class QbwcService:
                         session.pending_event = filtered_event
                         session.pending_event_original_line_count = original_line_count
                         session.pending_event_dropped_line_count = dropped_line_count
+                        session.pending_account_create_queue = []
                         session.pending_item_create_queue = missing_item_creates
                         return self._send_next_item_create_request(
                             session,
                             qbxml_version=qbxml_version,
+                            requested_major=_qbxml_major,
+                            requested_minor=_qbxml_minor,
                         )
 
                     return self._send_event_request(
@@ -972,6 +1471,8 @@ class QbwcService:
 
                 self._cached_qb_inventory_part_keys = set(self._qb_items_query_accumulator)
                 self._cached_qb_inventory_part_names = set(self._qb_items_query_name_accumulator)
+                self._cached_qb_inventory_part_details = dict(self._qb_items_query_detail_accumulator)
+                self._rebuild_qb_item_detail_lookup()
                 self._cached_qb_items_loaded_at_monotonic = time.monotonic()
                 self._cached_qb_items_loaded_at_epoch_ms = int(time.time() * 1000)
                 self._persist_qb_items_cache_file()
@@ -981,6 +1482,77 @@ class QbwcService:
             except Exception as exc:
                 self._reset_qb_items_query_state()
                 session.last_error = f"receiveResponseXML item query error: {exc}"
+                return self._qbwc_progress_percent()
+            finally:
+                self._reset_in_flight_request_state(session)
+
+        if session.in_flight_request_kind == "account_create":
+            event_id = (
+                session.in_flight_event_id
+                or _optional_text((session.pending_event or {}).get("eventId"))
+            )
+            account_full_name = _optional_text(
+                (session.in_flight_account_create or {}).get("accountFullName")
+            )
+            try:
+                if (hresult or "").strip():
+                    error_message = (message or "").strip() or "QuickBooks returned HResult failure."
+                    retryable = not _is_hresult_parse_error(hresult)
+                    if event_id:
+                        self.convex.apply_qb_result(
+                            event_id=event_id,
+                            ticket=session.ticket,
+                            success=False,
+                            qb_txn_type=session.in_flight_txn_type,
+                            qb_error_code=(hresult or "HRESULT_ERROR").strip(),
+                            qb_error_message=error_message,
+                            retryable=retryable,
+                        )
+                    self._clear_pending_event_state(session)
+                    session.last_error = error_message
+                    return self._qbwc_progress_percent()
+
+                parsed = parse_qbxml_response(response_xml or "")
+                if parsed.success or _is_duplicate_name_conflict(parsed.status_code):
+                    if account_full_name:
+                        self._cache_known_account_name(session, account_full_name)
+                    session.last_error = ""
+                    if (
+                        session.pending_account_create_queue
+                        or session.pending_item_create_queue
+                        or session.pending_event
+                    ):
+                        return 0
+                    return self._qbwc_progress_percent()
+
+                if event_id:
+                    self.convex.apply_qb_result(
+                        event_id=event_id,
+                        ticket=session.ticket,
+                        success=False,
+                        qb_txn_type=session.in_flight_txn_type,
+                        qb_error_code=parsed.status_code,
+                        qb_error_message=parsed.status_message or "QuickBooks reported an error.",
+                    )
+                self._clear_pending_event_state(session)
+                session.last_error = parsed.status_message or "QuickBooks reported an error."
+                return self._qbwc_progress_percent()
+            except Exception as exc:
+                if event_id:
+                    try:
+                        self.convex.apply_qb_result(
+                            event_id=event_id,
+                            ticket=session.ticket,
+                            success=False,
+                            qb_txn_type=session.in_flight_txn_type,
+                            qb_error_code="ACCOUNT_CREATE_ERROR",
+                            qb_error_message=f"receiveResponseXML account create error: {exc}",
+                            retryable=True,
+                        )
+                    except Exception:
+                        pass
+                self._clear_pending_event_state(session)
+                session.last_error = f"receiveResponseXML account create error: {exc}"
                 return self._qbwc_progress_percent()
             finally:
                 self._reset_in_flight_request_state(session)
@@ -996,6 +1568,7 @@ class QbwcService:
             try:
                 if (hresult or "").strip():
                     error_message = (message or "").strip() or "QuickBooks returned HResult failure."
+                    retryable = not _is_hresult_parse_error(hresult)
                     if event_id:
                         self.convex.apply_qb_result(
                             event_id=event_id,
@@ -1004,20 +1577,58 @@ class QbwcService:
                             qb_txn_type=session.in_flight_txn_type,
                             qb_error_code=(hresult or "HRESULT_ERROR").strip(),
                             qb_error_message=error_message,
-                            retryable=True,
+                            retryable=retryable,
                         )
                     self._clear_pending_event_state(session)
                     session.last_error = error_message
                     return self._qbwc_progress_percent()
 
                 parsed = parse_qbxml_response(response_xml or "")
-                if parsed.success or _is_duplicate_item_name_conflict(parsed.status_code):
+                if (
+                    parsed.success
+                    or _is_duplicate_name_conflict(parsed.status_code)
+                ):
                     if item_full_name:
                         self._cache_created_item_name(item_full_name)
                     session.last_error = ""
-                    if session.pending_item_create_queue or session.pending_event:
+                    if (
+                        session.pending_account_create_queue
+                        or session.pending_item_create_queue
+                        or session.pending_event
+                    ):
                         return 0
                     return self._qbwc_progress_percent()
+
+                if (
+                    self.config.qb_accounts_auto_create
+                    and _is_invalid_item_account_reference(
+                        parsed.status_code,
+                        parsed.status_message,
+                    )
+                ):
+                    create_spec = dict(session.in_flight_item_create or {})
+                    missing_account_full_name = _extract_missing_item_account_full_name(
+                        parsed.status_message,
+                    )
+                    missing_account_key = _normalize_account_key(missing_account_full_name)
+                    if (
+                        create_spec
+                        and missing_account_key
+                        and _record_item_account_attempt(create_spec, missing_account_key)
+                    ):
+                        if event_id:
+                            account_specs = self._build_missing_account_create_specs(
+                                session=session,
+                                event_id=event_id,
+                                create_spec=create_spec,
+                                missing_account_full_name=missing_account_full_name,
+                            )
+                            if account_specs:
+                                session.pending_account_create_queue.extend(account_specs)
+                            if account_specs or missing_account_key in session.known_account_keys:
+                                session.pending_item_create_queue.insert(0, create_spec)
+                                session.last_error = ""
+                                return 0
 
                 if event_id:
                     self.convex.apply_qb_result(
@@ -1027,7 +1638,6 @@ class QbwcService:
                         qb_txn_type=session.in_flight_txn_type,
                         qb_error_code=parsed.status_code,
                         qb_error_message=parsed.status_message or "QuickBooks reported an error.",
-                        retryable=True,
                     )
                 self._clear_pending_event_state(session)
                 session.last_error = parsed.status_message or "QuickBooks reported an error."
@@ -1059,6 +1669,7 @@ class QbwcService:
         try:
             if (hresult or "").strip():
                 error_message = (message or "").strip() or "QuickBooks returned HResult failure."
+                retryable = not _is_hresult_parse_error(hresult)
                 self.convex.apply_qb_result(
                     event_id=event_id,
                     ticket=session.ticket,
@@ -1066,7 +1677,7 @@ class QbwcService:
                     qb_txn_type=session.in_flight_txn_type,
                     qb_error_code=(hresult or "HRESULT_ERROR").strip(),
                     qb_error_message=error_message,
-                    retryable=True,
+                    retryable=retryable,
                 )
                 session.last_error = error_message
                 return self._qbwc_progress_percent()
@@ -1090,7 +1701,6 @@ class QbwcService:
                 qb_txn_type=parsed.txn_type or session.in_flight_txn_type,
                 qb_error_code=parsed.status_code,
                 qb_error_message=parsed.status_message or "QuickBooks reported an error.",
-                retryable=True,
             )
             session.last_error = parsed.status_message or "QuickBooks reported an error."
             return self._qbwc_progress_percent()

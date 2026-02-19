@@ -85,11 +85,16 @@ class ConvexCliClient:
             )
         return parsed
 
-    def get_next_pending_event(self, limit: int = 1) -> dict[str, Any]:
-        return self.run(
-            "qb_queue:getNextPendingQbEvent",
-            {"limit": limit},
-        )
+    def get_next_pending_event(
+        self,
+        limit: int = 1,
+        *,
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"limit": limit}
+        if now_ms is not None:
+            payload["nowMs"] = now_ms
+        return self.run("qb_queue:getNextPendingQbEvent", payload)
 
     def mark_event_in_flight(self, event_id: str, ticket: str) -> dict[str, Any]:
         return self.run(

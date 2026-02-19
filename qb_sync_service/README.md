@@ -40,7 +40,9 @@ Outputs:
 ## Endpoints
 - `GET /` health JSON
 - `POST /qbwc` QBWC SOAP endpoint
-- `GET /qbwc/items-cache` live QB item-cache snapshot (add `?includeItems=0` to omit full item list)
+- `GET /qbwc/items-cache` live QB item-cache snapshot
+  - add `?includeItems=0` to omit full item list
+  - add `?includeDetails=1` to include full item details (accounts/cost/price/qoh) when available
 
 ## Required environment
 - `QBWC_USERNAME`
@@ -68,15 +70,28 @@ Direct QuickBooks pull mode (no CSV export required):
   - `QB_ITEMS_QUERY_MODE`:
     - `auto` (default): start with `ItemInventoryQueryRq`, auto-fallback on `0x80040400`
     - `item_query_fallback`: force compatibility mode (`ItemQueryRq`) from the first request
-- Latest pulled items are also written to `.tmp/qb_items_live_from_qbwc.csv` for downstream scripts.
+- Latest pulled items are also written to:
+  - `.tmp/qb_items_live_from_qbwc.csv` (name list)
+  - `.tmp/qb_items_live_detail_from_qbwc.csv` (full detail rows)
 
 Missing-item auto-create:
 - `QB_ITEMS_AUTO_CREATE=true` (default) enables automatic `ItemInventoryAddRq` when an event SKU is missing in QB.
+- `QB_ACCOUNTS_AUTO_CREATE=true` (default) enables automatic `AccountAddRq` when ItemInventoryAdd fails with missing account references.
+- Overlong QuickBooks list `Name` segments are auto-truncated to QB limits with a deterministic hash suffix.
 - Required mappings for auto-create can come from Convex `inventory_parts` fields, or fall back to:
   - `QB_ITEM_INCOME_ACCOUNT_DEFAULT`
   - `QB_ITEM_COGS_ACCOUNT_DEFAULT`
   - `QB_ITEM_ASSET_ACCOUNT_DEFAULT`
 - If item creation succeeds (or QB returns duplicate-name `3100`), the service continues with the original event.
+
+Item account sync (existing QB items):
+- Queue `createAdjustmentEvent` events with `createdBy` starting with `qb-item-account-sync`.
+- Middleware emits `ItemInventoryModRq` (using cached QB `ListID`/`EditSequence`) so Income/COGS/Asset accounts update on existing QB items.
+- Helper script:
+```bash
+python execution/queue_qb_item_account_sync.py --prod --dry-run
+python execution/queue_qb_item_account_sync.py --prod
+```
 
 Queue QB-only zero-outs directly from live cache (no manual QB export):
 ```bash

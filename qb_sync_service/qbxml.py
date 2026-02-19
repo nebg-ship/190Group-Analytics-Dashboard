@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -20,34 +21,96 @@ def _format_number(value: Any) -> str:
     return as_text or "0"
 
 
+def _is_valid_xml_char(character: str) -> bool:
+    code = ord(character)
+    return (
+        code in (0x9, 0xA, 0xD)
+        or 0x20 <= code <= 0xD7FF
+        or 0xE000 <= code <= 0xFFFD
+        or 0x10000 <= code <= 0x10FFFF
+    )
+
+
+def _sanitize_text(value: Any) -> str:
+    text = str(value or "")
+    # Normalize common mojibake artifacts from CSV/Excel and copy-pasted text.
+    text = text.replace("\u00c2\u00b7", "\u00b7")
+    text = text.replace("\u00e2\u20ac\u2122", "'")
+    text = text.replace("\u00e2\u20ac\u02dc", "'")
+    text = text.replace("\u00e2\u20ac\u0153", '"')
+    text = text.replace("\u00e2\u20ac\u009d", '"')
+    text = text.replace("\u2019", "'")
+    text = text.replace("\u2018", "'")
+    text = text.replace("\u201c", '"')
+    text = text.replace("\u201d", '"')
+    text = text.replace("\u00a0", " ")
+    # XML 1.0 disallows most control characters; strip them defensively.
+    return "".join(ch for ch in text if _is_valid_xml_char(ch))
+
+
+def _ascii_xml(value: str) -> str:
+    # QuickBooks Desktop XML parsing can choke on raw non-ASCII bytes.
+    # Emit ASCII-only XML while preserving characters via numeric entities.
+    encoded: list[str] = []
+    for character in value:
+        code = ord(character)
+        if code < 128:
+            encoded.append(character)
+        else:
+            encoded.append(f"&#{code};")
+    return "".join(encoded)
+
+
 def _memo_for_event(event: dict[str, Any]) -> str:
     pieces = [
-        event.get("eventType", ""),
-        str(event.get("eventId", "")),
-        event.get("createdBy") or "",
-        event.get("memo") or "",
+        _sanitize_text(event.get("eventType", "")),
+        _sanitize_text(event.get("eventId", "")),
+        _sanitize_text(event.get("createdBy") or ""),
+        _sanitize_text(event.get("memo") or ""),
     ]
     joined = " ".join(piece for piece in pieces if piece).strip()
     return joined[:4095]
 
 
-def _normalize_account_full_name(value: str) -> str:
-    account = (value or "").strip()
+_QB_LIST_NAME_MAX_LEN = 31
+_QB_LIST_HASH_SUFFIX_LEN = 6
+
+
+def _truncate_qb_list_name_segment(value: str, max_len: int = _QB_LIST_NAME_MAX_LEN) -> str:
+    text = _sanitize_text(value).strip()
+    if not text or len(text) <= max_len:
+        return text
+    if max_len <= (_QB_LIST_HASH_SUFFIX_LEN + 1):
+        return text[:max_len]
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:_QB_LIST_HASH_SUFFIX_LEN].upper()
+    prefix_len = max_len - (_QB_LIST_HASH_SUFFIX_LEN + 1)
+    return f"{text[:prefix_len]}-{digest}"
+
+
+def _normalize_account_full_name(
+    value: str,
+    *,
+    collapse_cogs_subaccount: bool = False,
+) -> str:
+    account = _sanitize_text(value).strip()
     if not account:
         return account
     # Normalize common artifacts from CSV/imported account names.
-    account = account.replace("Â·", "·")
-    account = account.replace("’", "'")
+    account = account.replace("\u00c2\u00b7", "\u00b7")
+    account = account.replace("\u00e2\u20ac\u2122", "'")
     # QB inventory adjustments can reject deep COGS subaccount paths; prefer root account.
-    if ":" in account:
+    if collapse_cogs_subaccount and ":" in account:
         root = account.split(":", 1)[0].strip()
         if root.lower().startswith("cog"):
             account = root
-    return account
+    segments = [segment.strip() for segment in account.split(":") if segment.strip()]
+    if not segments:
+        return ""
+    return ":".join(_truncate_qb_list_name_segment(segment) for segment in segments)
 
 
 def _line_item_full_name(line: dict[str, Any]) -> str:
-    value = (line.get("qbItemFullName") or line.get("sku") or "").strip()
+    value = _sanitize_text(line.get("qbItemFullName") or line.get("sku") or "").strip()
     if not value:
         raise ValueError("Event line is missing qbItemFullName/sku.")
     return value
@@ -78,7 +141,7 @@ def _single_site_name(
 ) -> str:
     names: set[str] = set()
     for line in lines:
-        value = (line.get(field_name) or "").strip()
+        value = _sanitize_text(line.get(field_name) or "").strip()
         if value:
             names.add(value)
     if not names:
@@ -163,7 +226,10 @@ def _build_adjustment_request(
         ),
         default_adjustment_account.strip(),
     )
-    account_name = _normalize_account_full_name(account_name)
+    account_name = _normalize_account_full_name(
+        account_name,
+        collapse_cogs_subaccount=True,
+    )
     if not account_name:
         raise ValueError("Adjustment event has no account mapping and no default account configured.")
 
@@ -244,6 +310,64 @@ def _split_item_full_name(full_name: str) -> tuple[str, str]:
     return segments[-1], parent
 
 
+def _split_account_full_name(full_name: str) -> tuple[str, str]:
+    segments = [segment.strip() for segment in full_name.split(":") if segment.strip()]
+    if not segments:
+        raise ValueError("Account full name is empty.")
+    if len(segments) == 1:
+        return segments[0], ""
+    parent = ":".join(segments[:-1])
+    return segments[-1], parent
+
+
+def build_account_add_qbxml(
+    *,
+    account_full_name: str,
+    account_type: str,
+    request_id: str,
+    qbxml_version: str,
+    is_active: Any = True,
+) -> str:
+    clean_account_full_name = _normalize_account_full_name(
+        account_full_name,
+        collapse_cogs_subaccount=False,
+    )
+    if not clean_account_full_name:
+        raise ValueError("AccountAdd request is missing account_full_name.")
+
+    account_name, parent_full_name = _split_account_full_name(clean_account_full_name)
+    if not account_name:
+        raise ValueError("AccountAdd request resolved to an empty account Name.")
+
+    clean_account_type = _sanitize_text(account_type).strip()
+    if not clean_account_type:
+        raise ValueError("AccountAdd request is missing account_type.")
+
+    fields: list[str] = [f"<Name>{escape(account_name)}</Name>"]
+    fields.append("<IsActive>true</IsActive>" if _coerce_bool(is_active, True) else "<IsActive>false</IsActive>")
+    if parent_full_name:
+        fields.append(f"<ParentRef><FullName>{escape(parent_full_name)}</FullName></ParentRef>")
+    fields.append(f"<AccountType>{escape(clean_account_type)}</AccountType>")
+
+    request_xml = (
+        f"<AccountAddRq requestID=\"{escape(request_id)}\">"
+        "<AccountAdd>"
+        f"{''.join(fields)}"
+        "</AccountAdd>"
+        "</AccountAddRq>"
+    )
+    xml = (
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        f"<?qbxml version=\"{escape(qbxml_version)}\"?>"
+        "<QBXML>"
+        "<QBXMLMsgsRq onError=\"stopOnError\">"
+        f"{request_xml}"
+        "</QBXMLMsgsRq>"
+        "</QBXML>"
+    )
+    return _ascii_xml(xml)
+
+
 def build_item_inventory_add_qbxml(
     *,
     item_full_name: str,
@@ -258,7 +382,7 @@ def build_item_inventory_add_qbxml(
     purchase_cost: Any = None,
     is_active: Any = True,
 ) -> str:
-    clean_item_full_name = (item_full_name or "").strip()
+    clean_item_full_name = _sanitize_text(item_full_name).strip()
     if not clean_item_full_name:
         raise ValueError("ItemInventoryAdd request is missing item_full_name.")
 
@@ -283,7 +407,7 @@ def build_item_inventory_add_qbxml(
         )
     fields.append("<IsActive>true</IsActive>" if _coerce_bool(is_active, True) else "<IsActive>false</IsActive>")
 
-    clean_sales_desc = (sales_desc or "").strip()
+    clean_sales_desc = _sanitize_text(sales_desc).strip()
     if clean_sales_desc:
         fields.append(f"<SalesDesc>{escape(clean_sales_desc)}</SalesDesc>")
 
@@ -293,7 +417,7 @@ def build_item_inventory_add_qbxml(
 
     fields.append(f"<IncomeAccountRef><FullName>{escape(income_account)}</FullName></IncomeAccountRef>")
 
-    clean_purchase_desc = (purchase_desc or "").strip()
+    clean_purchase_desc = _sanitize_text(purchase_desc).strip()
     if clean_purchase_desc:
         fields.append(f"<PurchaseDesc>{escape(clean_purchase_desc)}</PurchaseDesc>")
 
@@ -311,7 +435,7 @@ def build_item_inventory_add_qbxml(
         "</ItemInventoryAdd>"
         "</ItemInventoryAddRq>"
     )
-    return (
+    xml = (
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
         f"<?qbxml version=\"{escape(qbxml_version)}\"?>"
         "<QBXML>"
@@ -320,6 +444,62 @@ def build_item_inventory_add_qbxml(
         "</QBXMLMsgsRq>"
         "</QBXML>"
     )
+    return _ascii_xml(xml)
+
+
+def build_item_inventory_mods_qbxml(
+    *,
+    mods: list[dict[str, Any]],
+    qbxml_version: str,
+) -> str:
+    if not mods:
+        raise ValueError("ItemInventoryMod request requires at least one item.")
+
+    request_nodes: list[str] = []
+    for index, mod in enumerate(mods, start=1):
+        request_id = _sanitize_text(mod.get("requestId") or str(index)).strip()
+        list_id = _sanitize_text(mod.get("listId") or "").strip()
+        edit_sequence = _sanitize_text(mod.get("editSequence") or "").strip()
+        if not list_id:
+            raise ValueError(f"ItemInventoryMod request is missing listId for row {index}.")
+        if not edit_sequence:
+            raise ValueError(f"ItemInventoryMod request is missing editSequence for row {index}.")
+
+        income_account = _normalize_account_full_name(mod.get("incomeAccountFullName") or "")
+        cogs_account = _normalize_account_full_name(mod.get("cogsAccountFullName") or "")
+        asset_account = _normalize_account_full_name(mod.get("assetAccountFullName") or "")
+        if not income_account:
+            raise ValueError(f"ItemInventoryMod request is missing income account for row {index}.")
+        if not cogs_account:
+            raise ValueError(f"ItemInventoryMod request is missing COGS account for row {index}.")
+        if not asset_account:
+            raise ValueError(f"ItemInventoryMod request is missing asset account for row {index}.")
+
+        fields = [
+            f"<ListID>{escape(list_id)}</ListID>",
+            f"<EditSequence>{escape(edit_sequence)}</EditSequence>",
+            f"<IncomeAccountRef><FullName>{escape(income_account)}</FullName></IncomeAccountRef>",
+            f"<COGSAccountRef><FullName>{escape(cogs_account)}</FullName></COGSAccountRef>",
+            f"<AssetAccountRef><FullName>{escape(asset_account)}</FullName></AssetAccountRef>",
+        ]
+        request_nodes.append(
+            f"<ItemInventoryModRq requestID=\"{escape(request_id)}\">"
+            "<ItemInventoryMod>"
+            f"{''.join(fields)}"
+            "</ItemInventoryMod>"
+            "</ItemInventoryModRq>"
+        )
+
+    xml = (
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        f"<?qbxml version=\"{escape(qbxml_version)}\"?>"
+        "<QBXML>"
+        "<QBXMLMsgsRq onError=\"stopOnError\">"
+        f"{''.join(request_nodes)}"
+        "</QBXMLMsgsRq>"
+        "</QBXML>"
+    )
+    return _ascii_xml(xml)
 
 
 def build_qbxml_for_event(
@@ -347,7 +527,7 @@ def build_qbxml_for_event(
     else:
         raise ValueError(f"Unsupported event type for qbXML: {event_type!r}")
 
-    return (
+    xml = (
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
         f"<?qbxml version=\"{escape(qbxml_version)}\"?>"
         "<QBXML>"
@@ -356,6 +536,7 @@ def build_qbxml_for_event(
         "</QBXMLMsgsRq>"
         "</QBXML>"
     )
+    return _ascii_xml(xml)
 
 
 def _localname(tag: str) -> str:
@@ -438,3 +619,5 @@ def parse_qbxml_response(response_xml: str) -> QbxmlResponseResult:
         txn_id=txn_id,
         txn_type=txn_type,
     )
+
+

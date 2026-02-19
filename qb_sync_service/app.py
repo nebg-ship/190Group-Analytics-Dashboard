@@ -105,7 +105,11 @@ def create_app(service: QbwcService) -> Flask:
 
     @app.get("/qbwc/items-cache")
     def qbwc_items_cache() -> Any:
-        snapshot = service.qb_items_snapshot()
+        include_details = (
+            request.args.get("includeDetails", "0").strip().lower()
+            in {"1", "true", "yes", "y", "on"}
+        )
+        snapshot = service.qb_items_snapshot(include_details=include_details)
         include_items = (
             request.args.get("includeItems", "1").strip().lower()
             in {"1", "true", "yes", "y", "on"}

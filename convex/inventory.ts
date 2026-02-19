@@ -46,6 +46,13 @@ function normalizeSku(sku: string): string {
     return sku.trim();
 }
 
+function normalizeAccountName(accountName: string | null | undefined): string {
+    if (typeof accountName !== "string") {
+        return "";
+    }
+    return accountName.trim().replace(/\u2019/g, "'");
+}
+
 function isPartActive(part: {
     Active_Status: string;
     isActive?: boolean;
@@ -172,6 +179,54 @@ export const upsertInventoryPartsBatch = mutation({
             processed: args.parts.length,
             inserted,
             updated,
+        };
+    },
+});
+
+export const remapPartCogsAccount = mutation({
+    args: {
+        fromCogsAccount: v.string(),
+        toCogsAccount: v.string(),
+        dryRun: v.optional(v.boolean()),
+        limit: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const fromAccount = normalizeAccountName(args.fromCogsAccount);
+        const toAccount = normalizeAccountName(args.toCogsAccount);
+        if (!fromAccount) {
+            throw new Error("fromCogsAccount is required.");
+        }
+        if (!toAccount) {
+            throw new Error("toCogsAccount is required.");
+        }
+        if (fromAccount === toAccount) {
+            throw new Error("fromCogsAccount and toCogsAccount must be different.");
+        }
+
+        const dryRun = args.dryRun ?? false;
+        const limit = Math.min(Math.max(Math.floor(args.limit ?? 100000), 1), 100000);
+        const parts = await ctx.db.query("inventory_parts").collect();
+        const matches = parts
+            .filter((part) => normalizeAccountName(part.COGS_Account) === fromAccount)
+            .slice(0, limit);
+
+        let updated = 0;
+        if (!dryRun) {
+            for (const part of matches) {
+                await ctx.db.patch(part._id, {
+                    COGS_Account: toAccount,
+                });
+                updated += 1;
+            }
+        }
+
+        return {
+            fromCogsAccount: fromAccount,
+            toCogsAccount: toAccount,
+            dryRun,
+            matched: matches.length,
+            updated,
+            sampleSkus: matches.slice(0, 25).map((part) => part.Sku),
         };
     },
 });
@@ -628,6 +683,48 @@ export const getInventoryOverview = query({
             rows,
             totalRows: rows.length,
             locationId: args.locationId ?? null,
+            generatedAt: Date.now(),
+        };
+    },
+});
+
+export const getOnHandBySkuAtLocation = query({
+    args: {
+        locationId: v.id("inventory_locations"),
+        skus: v.array(v.string()),
+    },
+    handler: async (ctx, args) => {
+        await getLocationOrThrow(ctx, args.locationId, false);
+
+        const uniqueSkus = Array.from(
+            new Set(
+                args.skus
+                    .map((sku) => normalizeSku(sku))
+                    .filter((sku) => sku.length > 0),
+            ),
+        );
+        if (uniqueSkus.length > 2000) {
+            throw new Error("Maximum 2000 SKUs per request.");
+        }
+
+        const rows: Array<{ sku: string; onHand: number }> = [];
+        for (const sku of uniqueSkus) {
+            const balance = await ctx.db
+                .query("inventory_balances")
+                .withIndex("by_sku_locationId", (q) =>
+                    q.eq("sku", sku).eq("locationId", args.locationId),
+                )
+                .first();
+            rows.push({
+                sku,
+                onHand: balance?.onHand ?? 0,
+            });
+        }
+
+        return {
+            rows,
+            totalRows: rows.length,
+            locationId: args.locationId,
             generatedAt: Date.now(),
         };
     },

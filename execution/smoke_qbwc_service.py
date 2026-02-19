@@ -21,7 +21,10 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from qb_sync_service.config import QbSyncConfig
-from qb_sync_service.service import QbwcService
+from qb_sync_service.service import (
+    QbwcService,
+    _extract_missing_item_account_full_name,
+)
 
 
 @dataclass
@@ -30,7 +33,12 @@ class FakeConvexClient:
     in_flight_calls: list[dict[str, Any]] = field(default_factory=list)
     apply_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def get_next_pending_event(self, limit: int = 1) -> dict[str, Any]:
+    def get_next_pending_event(
+        self,
+        limit: int = 1,
+        *,
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
         return {"events": self.events[:limit]}
 
     def mark_event_in_flight(self, event_id: str, ticket: str) -> dict[str, Any]:
@@ -64,10 +72,25 @@ class FakeConvexClient:
 
 
 def main() -> None:
+    run_missing_account_parser_smoke()
     run_csv_mode_smoke()
     run_auto_create_csv_mode_smoke()
+    run_auto_create_missing_account_smoke()
     run_qbwc_mode_smoke()
     print("QBWC_SMOKE_PASS")
+
+
+def run_missing_account_parser_smoke() -> None:
+    message = (
+        "There is an invalid reference to QuickBooks Account "
+        "\"Trees:WEB Trees:Conifer:Juniper Shimpaku \"Itoigawa\"\" "
+        "in the Item Inventory.  QuickBooks error message: Invalid argument.  "
+        "The specified record does not exist in the list."
+    )
+    extracted = _extract_missing_item_account_full_name(message)
+    assert extracted == 'Trees:WEB Trees:Conifer:Juniper Shimpaku "Itoigawa"', (
+        f"Unexpected parsed account reference: {extracted!r}"
+    )
 
 
 def run_csv_mode_smoke() -> None:
@@ -120,9 +143,11 @@ def run_csv_mode_smoke() -> None:
         qb_items_query_max_returned=1000,
         qb_items_query_mode="auto",
         qb_items_auto_create=True,
+        qb_accounts_auto_create=True,
         qb_item_income_account_default="",
         qb_item_cogs_account_default="",
         qb_item_asset_account_default="",
+        qb_retry_lookahead_seconds=0,
     )
     service = QbwcService(config=config, convex_client=fake_convex)
 
@@ -226,9 +251,11 @@ def run_auto_create_csv_mode_smoke() -> None:
         qb_items_query_max_returned=1000,
         qb_items_query_mode="auto",
         qb_items_auto_create=True,
+        qb_accounts_auto_create=True,
         qb_item_income_account_default="",
         qb_item_cogs_account_default="",
         qb_item_asset_account_default="",
+        qb_retry_lookahead_seconds=0,
     )
     service = QbwcService(config=config, convex_client=fake_convex)
 
@@ -295,6 +322,212 @@ def run_auto_create_csv_mode_smoke() -> None:
     assert fake_convex.apply_calls[-1]["qbTxnId"] == "TXN-SMOKE-AUTO-CREATE-1", "Transfer TxnID missing."
 
 
+def run_auto_create_missing_account_smoke() -> None:
+    tmp_dir = Path(PROJECT_ROOT) / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    qb_items_csv = tmp_dir / "smoke_qb_items_account_create.csv"
+    qb_items_csv.write_text(
+        "Sku,Type\n"
+        "LIVE-SKU-C,Inventory Part\n",
+        encoding="utf-8",
+    )
+
+    missing_sku = "MISSING-ACCOUNT-SKU-TEST"
+    missing_cogs_account = "COGS:Inventory Adj Exp: Loss, Damage, Shrinkage"
+    fake_event = {
+        "eventId": "jh_fake_transfer_account_create_1",
+        "eventType": "transfer",
+        "status": "committed",
+        "qbStatus": "pending",
+        "qbTxnType": "TransferInventoryAdd",
+        "effectiveDate": "2026-02-11",
+        "createdBy": "smoke-test",
+        "memo": "smoke transfer account create",
+        "idempotencyKey": "jh_fake_transfer_account_create_1",
+        "lines": [
+            {
+                "sku": missing_sku,
+                "qty": 2,
+                "qbItemFullName": missing_sku,
+                "fromSiteFullName": "Smoke A",
+                "toSiteFullName": "Smoke B",
+                "itemIncomeAccountFullName": "Sales:Supplies",
+                "itemCogsAccountFullName": missing_cogs_account,
+                "itemAssetAccountFullName": "12100 - Inventory Asset",
+                "itemSalesDescription": "Account-create test SKU",
+                "itemPurchaseDescription": "Account-create test SKU",
+                "itemSalesPrice": 12,
+                "itemPurchaseCost": 6,
+                "itemIsActive": True,
+            }
+        ],
+    }
+
+    fake_convex = FakeConvexClient(events=[fake_event])
+    config = QbSyncConfig(
+        qbwc_username="qbwc-user",
+        qbwc_password="qbwc-pass",
+        qb_company_file="",
+        qbxml_version="13.0",
+        default_adjustment_account="Inventory Adjustments",
+        server_version="190Group-QBWC-0.1.0",
+        min_client_version="",
+        bind_host="127.0.0.1",
+        bind_port=8085,
+        convex_env_file="",
+        convex_run_prod=False,
+        qb_items_csv=str(qb_items_csv),
+        qb_items_source="csv",
+        qb_items_refresh_minutes=60,
+        qb_items_query_max_returned=1000,
+        qb_items_query_mode="auto",
+        qb_items_auto_create=True,
+        qb_accounts_auto_create=True,
+        qb_item_income_account_default="",
+        qb_item_cogs_account_default="",
+        qb_item_asset_account_default="",
+        qb_retry_lookahead_seconds=0,
+    )
+    service = QbwcService(config=config, convex_client=fake_convex)
+
+    ticket = service.authenticate("qbwc-user", "qbwc-pass")[0]
+    assert ticket not in {"nvu", ""}, "authenticate did not return ticket for account-create smoke."
+
+    request_1 = service.send_request_xml(
+        ticket=ticket,
+        _hcp_response="",
+        _company_file_name="",
+        _qbxml_country="US",
+        _qbxml_major="13",
+        _qbxml_minor="0",
+    )
+    assert "ItemInventoryAddRq" in request_1, "Expected ItemInventoryAddRq before account auto-create."
+
+    item_add_invalid_account_response = (
+        "<?xml version=\"1.0\"?>"
+        "<QBXML><QBXMLMsgsRs>"
+        "<ItemInventoryAddRs requestID=\"jh_fake_transfer_account_create_1\" "
+        "statusCode=\"3140\" statusSeverity=\"Error\" "
+        "statusMessage=\"There is an invalid reference to QuickBooks Account "
+        f"&quot;{missing_cogs_account}&quot; in the Item Inventory. "
+        "QuickBooks error message: Invalid argument. The specified record does not exist in the list.\">"
+        "</ItemInventoryAddRs>"
+        "</QBXMLMsgsRs></QBXML>"
+    )
+    completion_1 = service.receive_response_xml(
+        ticket=ticket,
+        response_xml=item_add_invalid_account_response,
+        hresult="",
+        message="",
+    )
+    assert completion_1 == 0, "Invalid account response should trigger account auto-create flow."
+
+    expected_accounts = [
+        "COGS",
+        "COGS:Inventory Adj Exp",
+        missing_cogs_account,
+    ]
+    for expected_account in expected_accounts:
+        request = service.send_request_xml(
+            ticket=ticket,
+            _hcp_response="",
+            _company_file_name="",
+            _qbxml_country="US",
+            _qbxml_major="13",
+            _qbxml_minor="0",
+        )
+        assert "AccountAddRq" in request, "Expected AccountAddRq while creating missing account path."
+        account_parts = [part.strip() for part in expected_account.split(":") if part.strip()]
+        expected_name = account_parts[-1]
+        expected_parent = ":".join(account_parts[:-1])
+        name_start = request.find("<Name>")
+        name_end = request.find("</Name>", name_start + len("<Name>"))
+        assert name_start != -1 and name_end != -1, "AccountAddRq is missing Name field."
+        actual_name = request[name_start + len("<Name>") : name_end]
+        if len(expected_name) <= 31:
+            assert actual_name == expected_name, f"Expected account Name {expected_name} in AccountAddRq."
+        else:
+            assert len(actual_name) <= 31, "Expected long account Name to be truncated for QuickBooks limits."
+            assert actual_name.startswith(expected_name[:10]), "Truncated account Name should preserve prefix."
+        if expected_parent:
+            assert f"<FullName>{expected_parent}</FullName>" in request, (
+                f"Expected account ParentRef {expected_parent} in AccountAddRq."
+            )
+
+        account_add_response = (
+            "<?xml version=\"1.0\"?>"
+            "<QBXML><QBXMLMsgsRs>"
+            "<AccountAddRs requestID=\"jh_fake_transfer_account_create_1\" "
+            "statusCode=\"0\" statusSeverity=\"Info\" statusMessage=\"Status OK\">"
+            "<AccountRet><ListID>80000001-123456789</ListID></AccountRet>"
+            "</AccountAddRs>"
+            "</QBXMLMsgsRs></QBXML>"
+        )
+        completion = service.receive_response_xml(
+            ticket=ticket,
+            response_xml=account_add_response,
+            hresult="",
+            message="",
+        )
+        assert completion == 0, "Account create should keep QBWC polling for remaining work."
+
+    request_after_accounts = service.send_request_xml(
+        ticket=ticket,
+        _hcp_response="",
+        _company_file_name="",
+        _qbxml_country="US",
+        _qbxml_major="13",
+        _qbxml_minor="0",
+    )
+    assert "ItemInventoryAddRq" in request_after_accounts, "Item create should retry after account creation."
+
+    item_add_success_response = (
+        "<?xml version=\"1.0\"?>"
+        "<QBXML><QBXMLMsgsRs>"
+        "<ItemInventoryAddRs requestID=\"jh_fake_transfer_account_create_1\" "
+        "statusCode=\"0\" statusSeverity=\"Info\" statusMessage=\"Status OK\">"
+        "<ItemInventoryRet><ListID>80000002-123456789</ListID></ItemInventoryRet>"
+        "</ItemInventoryAddRs>"
+        "</QBXMLMsgsRs></QBXML>"
+    )
+    completion_2 = service.receive_response_xml(
+        ticket=ticket,
+        response_xml=item_add_success_response,
+        hresult="",
+        message="",
+    )
+    assert completion_2 == 0, "After item create retry, service should continue to event request."
+
+    request_final = service.send_request_xml(
+        ticket=ticket,
+        _hcp_response="",
+        _company_file_name="",
+        _qbxml_country="US",
+        _qbxml_major="13",
+        _qbxml_minor="0",
+    )
+    assert "TransferInventoryAddRq" in request_final, "Expected transfer request after account+item creation."
+
+    transfer_response = (
+        "<?xml version=\"1.0\"?>"
+        "<QBXML><QBXMLMsgsRs>"
+        "<TransferInventoryAddRs requestID=\"jh_fake_transfer_account_create_1\" "
+        "statusCode=\"0\" statusSeverity=\"Info\" statusMessage=\"Status OK\">"
+        "<TransferInventoryRet><TxnID>TXN-SMOKE-ACCOUNT-CREATE-1</TxnID></TransferInventoryRet>"
+        "</TransferInventoryAddRs>"
+        "</QBXMLMsgsRs></QBXML>"
+    )
+    completion_3 = service.receive_response_xml(
+        ticket=ticket,
+        response_xml=transfer_response,
+        hresult="",
+        message="",
+    )
+    assert completion_3 == 0, "Fake pending events should keep progress at 0."
+    assert fake_convex.apply_calls[-1]["success"] is True, "Account auto-create flow should end in success."
+    assert fake_convex.apply_calls[-1]["qbTxnId"] == "TXN-SMOKE-ACCOUNT-CREATE-1", "Final TxnID missing."
+
+
 def run_qbwc_mode_smoke() -> None:
     fake_event = {
         "eventId": "jh_fake_transfer_qbwc_1",
@@ -335,9 +568,11 @@ def run_qbwc_mode_smoke() -> None:
         qb_items_query_max_returned=1000,
         qb_items_query_mode="auto",
         qb_items_auto_create=True,
+        qb_accounts_auto_create=True,
         qb_item_income_account_default="",
         qb_item_cogs_account_default="",
         qb_item_asset_account_default="",
+        qb_retry_lookahead_seconds=0,
     )
     service = QbwcService(config=config, convex_client=fake_convex)
 

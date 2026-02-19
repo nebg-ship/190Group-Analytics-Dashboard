@@ -38,9 +38,11 @@ class QbSyncConfig:
     qb_items_query_max_returned: int
     qb_items_query_mode: str
     qb_items_auto_create: bool
+    qb_accounts_auto_create: bool
     qb_item_income_account_default: str
     qb_item_cogs_account_default: str
     qb_item_asset_account_default: str
+    qb_retry_lookahead_seconds: int
 
     @staticmethod
     def from_env() -> "QbSyncConfig":
@@ -69,6 +71,7 @@ class QbSyncConfig:
             ),
             qb_items_query_mode=os.getenv("QB_ITEMS_QUERY_MODE", "auto").strip(),
             qb_items_auto_create=_env_bool("QB_ITEMS_AUTO_CREATE", True),
+            qb_accounts_auto_create=_env_bool("QB_ACCOUNTS_AUTO_CREATE", True),
             qb_item_income_account_default=os.getenv(
                 "QB_ITEM_INCOME_ACCOUNT_DEFAULT",
                 "",
@@ -81,4 +84,8 @@ class QbSyncConfig:
                 "QB_ITEM_ASSET_ACCOUNT_DEFAULT",
                 "",
             ).strip(),
+            qb_retry_lookahead_seconds=max(
+                0,
+                _env_int("QB_RETRY_LOOKAHEAD_SECONDS", 0),
+            ),
         )
