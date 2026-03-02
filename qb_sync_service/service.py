@@ -38,6 +38,7 @@ class SessionState:
     in_flight_account_create: dict[str, Any] | None = None
     in_flight_item_create: dict[str, Any] | None = None
     known_account_keys: set[str] = field(default_factory=set)
+    pending_missing_account_attempt_keys: list[str] = field(default_factory=list)
 
 
 def _parse_version(value: str) -> tuple[int, ...]:
@@ -225,17 +226,18 @@ def _is_invalid_item_account_reference(status_code: str, status_message: str) ->
         return False
     message = (status_message or "").casefold()
     return (
-        "invalid reference to quickbooks account" in message
-        and "item inventory" in message
+        "invalid reference" in message
+        and "account" in message
+        and ("item inventory" in message or "iteminventory" in message)
     )
 
 
 _ITEM_ACCOUNT_REF_REGEX = re.compile(
-    r'invalid reference to quickbooks account\s+"(.+?)"\s+in the item inventory',
+    r'invalid reference to quickbooks (?:post |cogs )?account\s+"(.+?)"\s+in the item ?inventory',
     re.IGNORECASE,
 )
 _GENERIC_ACCOUNT_REF_REGEX = re.compile(
-    r'invalid reference to quickbooks account\s+"(.+)"',
+    r'invalid reference to quickbooks (?:post |cogs )?account\s+"(.+)"',
     re.IGNORECASE,
 )
 
@@ -262,16 +264,40 @@ def _account_path_prefixes(value: str) -> list[str]:
     return prefixes
 
 
+def _account_path_contains_key(full_name: str, account_key: str) -> bool:
+    if not full_name or not account_key:
+        return False
+    prefixes = {
+        _normalize_account_key(prefix)
+        for prefix in _account_path_prefixes(full_name)
+    }
+    return account_key in prefixes
+
+
 def _extract_missing_item_account_full_name(status_message: str) -> str:
     text = _optional_text(status_message)
     if not text:
         return ""
     lowered = text.casefold()
     prefix = 'invalid reference to quickbooks account "'
+    post_prefix = 'invalid reference to quickbooks post account "'
+    cogs_prefix = 'invalid reference to quickbooks cogs account "'
     suffix = '" in the item inventory'
     start = lowered.find(prefix)
     if start != -1:
         value_start = start + len(prefix)
+        end = lowered.find(suffix, value_start)
+        if end != -1 and end > value_start:
+            return _optional_text(text[value_start:end])
+    start = lowered.find(post_prefix)
+    if start != -1:
+        value_start = start + len(post_prefix)
+        end = lowered.find(suffix, value_start)
+        if end != -1 and end > value_start:
+            return _optional_text(text[value_start:end])
+    start = lowered.find(cogs_prefix)
+    if start != -1:
+        value_start = start + len(cogs_prefix)
         end = lowered.find(suffix, value_start)
         if end != -1 and end > value_start:
             return _optional_text(text[value_start:end])
@@ -698,6 +724,7 @@ class QbwcService:
         session.pending_item_create_queue = []
         session.in_flight_account_create = None
         session.in_flight_item_create = None
+        session.pending_missing_account_attempt_keys = []
 
     def _cache_created_item_name(self, item_full_name: str) -> None:
         clean_name = item_full_name.strip()
@@ -934,6 +961,32 @@ class QbwcService:
         created_by = _optional_text(event.get("createdBy")).casefold()
         return created_by.startswith("qb-item-account-sync")
 
+    def _resolve_item_account_sync_accounts(
+        self,
+        line: dict[str, Any],
+        detail: dict[str, Any],
+        *,
+        prefer_qb_accounts: bool,
+    ) -> tuple[str, str, str]:
+        if prefer_qb_accounts:
+            income_account = _optional_text(detail.get("incomeAccountFullName"))
+            cogs_account = _optional_text(detail.get("cogsAccountFullName"))
+            asset_account = _optional_text(detail.get("assetAccountFullName"))
+        else:
+            income_account = (
+                _optional_text(line.get("itemIncomeAccountFullName"))
+                or _optional_text(detail.get("incomeAccountFullName"))
+            )
+            cogs_account = (
+                _optional_text(line.get("itemCogsAccountFullName"))
+                or _optional_text(detail.get("cogsAccountFullName"))
+            )
+            asset_account = (
+                _optional_text(line.get("itemAssetAccountFullName"))
+                or _optional_text(detail.get("assetAccountFullName"))
+            )
+        return income_account, cogs_account, asset_account
+
     def _build_item_account_sync_request(
         self,
         event: dict[str, Any],
@@ -943,6 +996,9 @@ class QbwcService:
         lines = event.get("lines", [])
         if not isinstance(lines, list) or not lines:
             raise ValueError("Item account sync event has no lines.")
+
+        created_by = _optional_text(event.get("createdBy")).casefold()
+        prefer_qb_accounts = "price-cost" in created_by
 
         mods: list[dict[str, Any]] = []
         for index, line in enumerate(lines):
@@ -962,18 +1018,13 @@ class QbwcService:
                 sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
                 raise ValueError(f"QB EditSequence is missing for account sync item: {sku}.")
 
-            income_account = (
-                _optional_text(line.get("itemIncomeAccountFullName"))
-                or _optional_text(detail.get("incomeAccountFullName"))
+            income_account, cogs_account, asset_account = self._resolve_item_account_sync_accounts(
+                line,
+                detail,
+                prefer_qb_accounts=prefer_qb_accounts,
             )
-            cogs_account = (
-                _optional_text(line.get("itemCogsAccountFullName"))
-                or _optional_text(detail.get("cogsAccountFullName"))
-            )
-            asset_account = (
-                _optional_text(line.get("itemAssetAccountFullName"))
-                or _optional_text(detail.get("assetAccountFullName"))
-            )
+            sales_price = line.get("itemSalesPrice") if isinstance(line, dict) else None
+            purchase_cost = line.get("itemPurchaseCost") if isinstance(line, dict) else None
             if not income_account:
                 sku = _optional_text(line.get("sku")) or _optional_text(line.get("qbItemFullName"))
                 raise ValueError(f"Income account is missing for account sync item: {sku}.")
@@ -997,12 +1048,66 @@ class QbwcService:
                     "incomeAccountFullName": income_account,
                     "cogsAccountFullName": cogs_account,
                     "assetAccountFullName": asset_account,
+                    "salesPrice": sales_price,
+                    "purchaseCost": purchase_cost,
                 }
             )
 
         if not mods:
             raise ValueError("Item account sync event has no valid lines.")
         return build_item_inventory_mods_qbxml(mods=mods, qbxml_version=qbxml_version), len(mods)
+
+    def _find_item_account_sync_create_spec(
+        self,
+        *,
+        event: dict[str, Any],
+        missing_account_full_name: str,
+        attempt_keys: list[str],
+    ) -> dict[str, Any] | None:
+        lines = event.get("lines", [])
+        if not isinstance(lines, list) or not lines:
+            return None
+
+        created_by = _optional_text(event.get("createdBy")).casefold()
+        prefer_qb_accounts = "price-cost" in created_by
+        missing_key = _normalize_account_key(missing_account_full_name)
+        fallback_spec: dict[str, Any] | None = None
+
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            detail = self._lookup_qb_item_detail_for_line(line)
+            if detail is None:
+                continue
+            income_account, cogs_account, asset_account = self._resolve_item_account_sync_accounts(
+                line,
+                detail,
+                prefer_qb_accounts=prefer_qb_accounts,
+            )
+            if not income_account or not cogs_account or not asset_account:
+                continue
+            item_full_name = (
+                _optional_text(detail.get("qbItemFullName"))
+                or _optional_text(line.get("qbItemFullName"))
+                or _optional_text(line.get("sku"))
+            )
+            spec = {
+                "itemFullName": item_full_name,
+                "incomeAccountFullName": income_account,
+                "cogsAccountFullName": cogs_account,
+                "assetAccountFullName": asset_account,
+                "missingAccountAttemptKeys": attempt_keys,
+            }
+            if missing_key and (
+                _account_path_contains_key(income_account, missing_key)
+                or _account_path_contains_key(cogs_account, missing_key)
+                or _account_path_contains_key(asset_account, missing_key)
+            ):
+                return spec
+            if fallback_spec is None:
+                fallback_spec = spec
+
+        return fallback_spec
 
     def _send_event_request(
         self,
@@ -1039,6 +1144,14 @@ class QbwcService:
 
         session.in_flight_event_id = event_id
         if request_kind == "item_account_sync":
+            if (
+                session.pending_event is None
+                or _optional_text(session.pending_event.get("eventId")) != event_id
+            ):
+                session.pending_event = dict(event)
+                session.pending_event_original_line_count = original_line_count
+                session.pending_event_dropped_line_count = dropped_line_count
+                session.pending_missing_account_attempt_keys = []
             session.in_flight_txn_type = "ItemInventoryMod"
             session.in_flight_request_kind = "item_account_sync"
         else:
@@ -1694,6 +1807,41 @@ class QbwcService:
                 session.last_error = ""
                 return self._qbwc_progress_percent()
 
+            if (
+                session.in_flight_request_kind == "item_account_sync"
+                and self.config.qb_accounts_auto_create
+                and _is_invalid_item_account_reference(
+                    parsed.status_code,
+                    parsed.status_message,
+                )
+            ):
+                missing_account_full_name = _extract_missing_item_account_full_name(
+                    parsed.status_message
+                )
+                missing_account_key = _normalize_account_key(missing_account_full_name)
+                if missing_account_key and event_id:
+                    pending_event = session.pending_event or {}
+                    create_spec = self._find_item_account_sync_create_spec(
+                        event=pending_event,
+                        missing_account_full_name=missing_account_full_name,
+                        attempt_keys=session.pending_missing_account_attempt_keys,
+                    )
+                    if (
+                        create_spec
+                        and _record_item_account_attempt(create_spec, missing_account_key)
+                    ):
+                        account_specs = self._build_missing_account_create_specs(
+                            session=session,
+                            event_id=event_id,
+                            create_spec=create_spec,
+                            missing_account_full_name=missing_account_full_name,
+                        )
+                        if account_specs:
+                            session.pending_account_create_queue.extend(account_specs)
+                        if account_specs or missing_account_key in session.known_account_keys:
+                            session.last_error = ""
+                            return 0
+
             self.convex.apply_qb_result(
                 event_id=event_id,
                 ticket=session.ticket,
@@ -1710,7 +1858,12 @@ class QbwcService:
         finally:
             self._reset_in_flight_request_state(session)
             pending_event_id = _optional_text((session.pending_event or {}).get("eventId"))
-            if pending_event_id and pending_event_id == event_id:
+            if (
+                pending_event_id
+                and pending_event_id == event_id
+                and not session.pending_account_create_queue
+                and not session.pending_item_create_queue
+            ):
                 self._clear_pending_event_state(session)
 
     def get_last_error(self, ticket: str) -> str:

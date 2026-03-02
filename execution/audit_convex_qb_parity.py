@@ -2,7 +2,7 @@
 Run an exact Convex vs QuickBooks parity audit for inventory parts.
 
 Compares, by item:
-- Quantity on hand
+- Quantity on hand (Convex total across all locations)
 - Income account
 - COGS account
 - Asset account
@@ -16,6 +16,7 @@ Usage:
   python execution/audit_convex_qb_parity.py --prod
   python execution/audit_convex_qb_parity.py --prod --qb-csv .tmp/qb_items_live_detail_from_qbwc.csv
   python execution/audit_convex_qb_parity.py --prod --allow-partial
+  python execution/audit_convex_qb_parity.py --prod --push-first
 """
 
 from __future__ import annotations
@@ -184,6 +185,55 @@ def parse_last_json(stdout: str) -> Any:
             pass
 
     raise RuntimeError("Convex command did not return parseable JSON.")
+
+
+def convex_run(
+    function_name: str,
+    args_obj: dict[str, Any],
+    *,
+    env_file: str | None,
+    run_prod: bool,
+    push: bool,
+) -> Any:
+    cmd = [
+        "node",
+        str(PROJECT_ROOT / "node_modules" / "convex" / "bin" / "main.js"),
+        "run",
+        "--typecheck",
+        "disable",
+        "--codegen",
+        "disable",
+    ]
+    if push:
+        cmd.append("--push")
+    if env_file:
+        cmd.extend(["--env-file", env_file])
+    if run_prod:
+        cmd.append("--prod")
+    cmd.extend([function_name, json.dumps(args_obj)])
+
+    proc = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+    )
+    parsed = parse_last_json(proc.stdout)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Convex run command failed.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"Return code: {proc.returncode}\n"
+            f"STDOUT:\n{proc.stdout}\n"
+            f"STDERR:\n{proc.stderr}"
+        )
+    if proc.stderr.strip():
+        print(
+            "WARNING: Convex CLI returned stderr output.\n"
+            f"CLI stderr:\n{proc.stderr.strip()}\n"
+        )
+    return parsed
 
 
 def convex_data_inventory_parts(*, limit: int, env_file: str | None, run_prod: bool) -> list[dict[str, Any]]:
@@ -406,10 +456,21 @@ def main() -> None:
         help="Read Convex production deployment.",
     )
     parser.add_argument(
+        "--push-first",
+        action="store_true",
+        help="Push Convex functions before running the audit.",
+    )
+    parser.add_argument(
         "--convex-limit",
         type=int,
         default=20000,
         help="Max inventory_parts rows to read from Convex.",
+    )
+    parser.add_argument(
+        "--balances-limit",
+        type=int,
+        default=50000,
+        help="Max on-hand total rows to accept from Convex.",
     )
     parser.add_argument(
         "--allow-partial",
@@ -437,6 +498,8 @@ def main() -> None:
 
     if args.convex_limit < 1:
         raise RuntimeError("--convex-limit must be >= 1")
+    if args.balances_limit < 1:
+        raise RuntimeError("--balances-limit must be >= 1")
     if args.min_qb_rows < 1:
         raise RuntimeError("--min-qb-rows must be >= 1")
 
@@ -464,6 +527,38 @@ def main() -> None:
         env_file=args.env_file,
         run_prod=args.prod,
     )
+    balances_payload = convex_run(
+        "inventory:getOnHandTotalsBySku",
+        {},
+        env_file=args.env_file,
+        run_prod=args.prod,
+        push=args.push_first,
+    )
+    if not isinstance(balances_payload, dict):
+        raise RuntimeError("Convex getOnHandTotalsBySku did not return an object.")
+    balance_rows = balances_payload.get("rows")
+    if not isinstance(balance_rows, list):
+        raise RuntimeError("Convex getOnHandTotalsBySku did not return rows.")
+
+    if len(balance_rows) >= args.balances_limit and not args.allow_partial:
+        raise RuntimeError(
+            "inventory_balances totals hit balances-limit; rerun with --allow-partial "
+            "or increase --balances-limit."
+        )
+
+    on_hand_by_sku: dict[str, float] = {}
+    on_hand_by_key: dict[str, float] = {}
+    for balance in balance_rows:
+        if not isinstance(balance, dict):
+            continue
+        sku = str(balance.get("sku") or "").strip()
+        if not sku:
+            continue
+        qty = parse_float(balance.get("onHand"))
+        if qty is None:
+            continue
+        on_hand_by_sku[sku] = qty
+        on_hand_by_key[normalize_item_key(sku)] = qty
 
     qb_by_key, qb_records = build_qb_lookup(qb_rows, qb_columns)
     if len(qb_records) < args.min_qb_rows:
@@ -536,7 +631,13 @@ def main() -> None:
                 continue
 
             field_stats[field_name]["compared"] += 1
-            convex_value_raw = part.get(convex_key)
+            if field_name == "quantity":
+                total_on_hand = on_hand_by_sku.get(sku)
+                if total_on_hand is None:
+                    total_on_hand = on_hand_by_key.get(normalize_item_key(sku), 0.0)
+                convex_value_raw = total_on_hand
+            else:
+                convex_value_raw = part.get(convex_key)
             qb_value_raw = qb_record.get(qb_key)
 
             if field_type == "number":

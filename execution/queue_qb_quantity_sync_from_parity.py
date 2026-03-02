@@ -2,7 +2,7 @@
 Queue QB quantity set-sync events from parity mismatch output.
 
 This script reads a parity mismatch CSV and enqueues `set` adjustments for SKUs
-with `quantity` mismatches, using Convex `Quantity_On_Hand_2025` values.
+with `quantity` mismatches, using Convex on-hand totals across all locations.
 
 Default location assignment matches opening-balance seed rules:
 - SKUs starting with WEB -> BELLINGHAM
@@ -151,7 +151,12 @@ def main() -> None:
     parser.add_argument("--bellingham-code", default="BELLINGHAM")
     parser.add_argument("--okeechobee-code", default="OKEECHOBEE")
     parser.add_argument("--chunk-size", type=int, default=100)
-    parser.add_argument("--parts-limit", type=int, default=20000)
+    parser.add_argument(
+        "--parts-limit",
+        type=int,
+        default=20000,
+        help="Maximum number of SKUs to request from Convex for on-hand totals.",
+    )
     parser.add_argument("--env-file", default=None)
     parser.add_argument("--prod", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -213,29 +218,34 @@ def main() -> None:
     if not okeechobee:
         raise RuntimeError(f"Location code not found: {okeechobee_code}")
 
-    parts_payload = convex_run(
-        "inventory:listPartQuantities",
-        {"includeInactive": True, "limit": args.parts_limit},
+    if len(target_skus) > args.parts_limit:
+        raise RuntimeError(
+            "Target SKU count exceeds --parts-limit. "
+            f"Found {len(target_skus)} SKUs, limit is {args.parts_limit}."
+        )
+
+    totals_payload = convex_run(
+        "inventory:getOnHandTotalsBySku",
+        {"skus": target_skus},
         env_file=args.env_file,
         push=False,
         run_prod=args.prod,
     )
-    if not isinstance(parts_payload, dict):
-        raise RuntimeError(f"Unexpected part payload: {type(parts_payload)!r}")
-    part_rows = parts_payload.get("rows", [])
-    if not isinstance(part_rows, list):
-        raise RuntimeError("Unexpected part rows payload.")
+    if not isinstance(totals_payload, dict):
+        raise RuntimeError(f"Unexpected totals payload: {type(totals_payload)!r}")
+    totals_rows = totals_payload.get("rows", [])
+    if not isinstance(totals_rows, list):
+        raise RuntimeError("Unexpected totals rows payload.")
 
-    target_lookup = set(target_skus)
     quantity_by_sku: dict[str, float] = {}
     negative_skus: list[str] = []
-    for row in part_rows:
+    for row in totals_rows:
         if not isinstance(row, dict):
             continue
         sku = str(row.get("sku") or "").strip()
-        if not sku or sku not in target_lookup:
+        if not sku:
             continue
-        qty = parse_float(row.get("quantityOnHand2025", 0))
+        qty = parse_float(row.get("onHand", 0))
         if qty < 0:
             negative_skus.append(sku)
             continue

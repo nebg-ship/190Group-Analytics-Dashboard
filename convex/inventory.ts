@@ -688,6 +688,55 @@ export const getInventoryOverview = query({
     },
 });
 
+export const getOnHandTotalsBySku = query({
+    args: {
+        skus: v.optional(v.array(v.string())),
+    },
+    handler: async (ctx, args) => {
+        const requestedSkus = args.skus
+            ? Array.from(
+                new Set(
+                    args.skus
+                        .map((sku) => normalizeSku(sku))
+                        .filter((sku) => sku.length > 0),
+                ),
+            )
+            : null;
+
+        if (requestedSkus && requestedSkus.length > 20000) {
+            throw new Error("Maximum 20000 SKUs per request.");
+        }
+
+        const balances = await ctx.db.query("inventory_balances").collect();
+        const totalsBySku = new Map<string, number>();
+        for (const balance of balances) {
+            if (!balance.sku) {
+                continue;
+            }
+            const current = totalsBySku.get(balance.sku) ?? 0;
+            totalsBySku.set(balance.sku, current + balance.onHand);
+        }
+
+        const rows = requestedSkus
+            ? requestedSkus.map((sku) => ({
+                sku,
+                onHand: totalsBySku.get(sku) ?? 0,
+            }))
+            : Array.from(totalsBySku.entries()).map(([sku, onHand]) => ({
+                sku,
+                onHand,
+            }));
+
+        rows.sort((a, b) => a.sku.localeCompare(b.sku));
+
+        return {
+            rows,
+            totalRows: rows.length,
+            generatedAt: Date.now(),
+        };
+    },
+});
+
 export const getOnHandBySkuAtLocation = query({
     args: {
         locationId: v.id("inventory_locations"),
@@ -1017,6 +1066,192 @@ export const listRecentEvents = query({
                 };
             }),
         );
+
+        return {
+            rows,
+            generatedAt: Date.now(),
+        };
+    },
+});
+
+export const listErrorEvents = query({
+    args: {
+        limit: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const limit = Math.min(Math.max(Math.floor(args.limit ?? 25), 1), 100);
+        const events = await ctx.db
+            .query("inventory_events")
+            .withIndex("by_qbStatus", (q) => q.eq("qbStatus", "error"))
+            .collect();
+
+        const sorted = events
+            .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+            .slice(0, limit);
+
+        const partCache = new Map<string, any>();
+        const locationCache = new Map<string, any>();
+        const reasonAccountCache = new Map<string, any>();
+
+        const getPart = async (sku: string) => {
+            const cacheKey = sku;
+            if (partCache.has(cacheKey)) {
+                return partCache.get(cacheKey);
+            }
+            const part = await ctx.db
+                .query("inventory_parts")
+                .withIndex("by_sku", (q) => q.eq("Sku", sku))
+                .first();
+            partCache.set(cacheKey, part);
+            return part;
+        };
+
+        const getLocation = async (locationId: any) => {
+            if (!locationId) {
+                return null;
+            }
+            if (locationCache.has(locationId)) {
+                return locationCache.get(locationId);
+            }
+            const location = await ctx.db.get(locationId);
+            locationCache.set(locationId, location);
+            return location;
+        };
+
+        const getReasonAccount = async (reasonCode: string | undefined) => {
+            if (!reasonCode) {
+                return null;
+            }
+            if (reasonAccountCache.has(reasonCode)) {
+                return reasonAccountCache.get(reasonCode);
+            }
+            const reasonAccount = await ctx.db
+                .query("inventory_reason_accounts")
+                .withIndex("by_reasonCode", (q) => q.eq("reasonCode", reasonCode))
+                .first();
+            reasonAccountCache.set(reasonCode, reasonAccount);
+            return reasonAccount;
+        };
+
+        const rows = await Promise.all(
+            sorted.map(async (event) => {
+                const lines = await ctx.db
+                    .query("inventory_event_lines")
+                    .withIndex("by_eventId", (q) => q.eq("eventId", event._id))
+                    .collect();
+
+                const hydratedLines = await Promise.all(
+                    lines.map(async (line) => {
+                        const part = await getPart(line.sku);
+                        const fromLocation = await getLocation(line.fromLocationId);
+                        const toLocation = await getLocation(line.toLocationId);
+                        const location = await getLocation(line.locationId);
+                        const reasonAccount = await getReasonAccount(line.reasonCode);
+
+                        return {
+                            lineId: line._id,
+                            sku: line.sku,
+                            qty: line.qty,
+                            newQty: line.newQty ?? null,
+                            reasonCode: line.reasonCode ?? null,
+                            qbAccountFullName:
+                                reasonAccount?.qbAccountFullName ??
+                                part?.COGS_Account ??
+                                null,
+                            qbItemFullName: part?.qbItemFullName ?? part?.Sku ?? line.sku,
+                            qbItemListId: part?.qbItemListId ?? null,
+                            itemIncomeAccountFullName: part?.Account ?? part?.Category ?? null,
+                            itemCogsAccountFullName: part?.COGS_Account ?? null,
+                            itemAssetAccountFullName: part?.Asset_Account ?? null,
+                            itemSalesDescription: part?.Description ?? null,
+                            itemPurchaseDescription: part?.Purchase_Description ?? null,
+                            itemSalesPrice:
+                                typeof part?.Price === "number" && Number.isFinite(part.Price)
+                                    ? part.Price
+                                    : null,
+                            itemPurchaseCost:
+                                typeof part?.Cost === "number" && Number.isFinite(part.Cost)
+                                    ? part.Cost
+                                    : null,
+                            itemIsActive:
+                                typeof part?.isActive === "boolean"
+                                    ? part.isActive
+                                    : (
+                                        typeof part?.Active_Status === "string"
+                                        && part.Active_Status.toLowerCase() === "active"
+                                    ),
+                            fromLocationId: line.fromLocationId ?? null,
+                            fromSiteFullName: fromLocation?.qbSiteFullName ?? null,
+                            toLocationId: line.toLocationId ?? null,
+                            toSiteFullName: toLocation?.qbSiteFullName ?? null,
+                            locationId: line.locationId ?? null,
+                            siteFullName: location?.qbSiteFullName ?? null,
+                        };
+                    }),
+                );
+
+                return {
+                    eventId: event._id,
+                    eventType: event.eventType,
+                    status: event.status,
+                    qbStatus: event.qbStatus,
+                    qbTxnType: event.qbTxnType ?? null,
+                    effectiveDate: event.effectiveDate,
+                    createdAt: event.createdAt,
+                    createdBy: event.createdBy ?? null,
+                    memo: event.memo ?? null,
+                    qbErrorCode: event.qbErrorCode ?? null,
+                    qbErrorMessage: event.qbErrorMessage ?? null,
+                    retryCount: event.retryCount,
+                    retryAt: event.retryAt,
+                    lines: hydratedLines,
+                };
+            }),
+        );
+
+        return {
+            rows,
+            generatedAt: Date.now(),
+        };
+    },
+});
+
+export const listEventsByCreatedBy = query({
+    args: {
+        createdBy: v.string(),
+        statuses: v.optional(v.array(v.string())),
+        limit: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const createdBy = args.createdBy.trim();
+        if (!createdBy) {
+            throw new Error("createdBy is required.");
+        }
+        const limit = Math.min(Math.max(Math.floor(args.limit ?? 5000), 1), 5000);
+        const allowedStatuses = new Set(["not_ready", "pending", "in_flight", "applied", "error"]);
+        const requested = (args.statuses ?? [])
+            .map((status) => status.trim())
+            .filter((status) => allowedStatuses.has(status));
+        const statusFilter = requested.length ? new Set(requested) : null;
+
+        const events = await ctx.db.query("inventory_events").collect();
+        const filtered = events.filter(
+            (event) =>
+                (event.createdBy ?? "") === createdBy
+                && (!statusFilter || statusFilter.has(event.qbStatus)),
+        );
+
+        const rows = filtered
+            .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+            .slice(0, limit)
+            .map((event) => ({
+                eventId: event._id,
+                createdAt: event.createdAt,
+                createdBy: event.createdBy ?? null,
+                qbStatus: event.qbStatus,
+                status: event.status,
+                memo: event.memo ?? null,
+            }));
 
         return {
             rows,

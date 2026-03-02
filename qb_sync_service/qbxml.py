@@ -468,6 +468,8 @@ def build_item_inventory_mods_qbxml(
         income_account = _normalize_account_full_name(mod.get("incomeAccountFullName") or "")
         cogs_account = _normalize_account_full_name(mod.get("cogsAccountFullName") or "")
         asset_account = _normalize_account_full_name(mod.get("assetAccountFullName") or "")
+        sales_price_text = _coerce_optional_decimal_text(mod.get("salesPrice"))
+        purchase_cost_text = _coerce_optional_decimal_text(mod.get("purchaseCost"))
         if not income_account:
             raise ValueError(f"ItemInventoryMod request is missing income account for row {index}.")
         if not cogs_account:
@@ -478,10 +480,15 @@ def build_item_inventory_mods_qbxml(
         fields = [
             f"<ListID>{escape(list_id)}</ListID>",
             f"<EditSequence>{escape(edit_sequence)}</EditSequence>",
-            f"<IncomeAccountRef><FullName>{escape(income_account)}</FullName></IncomeAccountRef>",
-            f"<COGSAccountRef><FullName>{escape(cogs_account)}</FullName></COGSAccountRef>",
-            f"<AssetAccountRef><FullName>{escape(asset_account)}</FullName></AssetAccountRef>",
         ]
+        # Respect qbXML field order: SalesPrice -> IncomeAccountRef -> PurchaseCost -> COGSAccountRef -> AssetAccountRef.
+        if sales_price_text is not None:
+            fields.append(f"<SalesPrice>{sales_price_text}</SalesPrice>")
+        fields.append(f"<IncomeAccountRef><FullName>{escape(income_account)}</FullName></IncomeAccountRef>")
+        if purchase_cost_text is not None:
+            fields.append(f"<PurchaseCost>{purchase_cost_text}</PurchaseCost>")
+        fields.append(f"<COGSAccountRef><FullName>{escape(cogs_account)}</FullName></COGSAccountRef>")
+        fields.append(f"<AssetAccountRef><FullName>{escape(asset_account)}</FullName></AssetAccountRef>")
         request_nodes.append(
             f"<ItemInventoryModRq requestID=\"{escape(request_id)}\">"
             "<ItemInventoryMod>"

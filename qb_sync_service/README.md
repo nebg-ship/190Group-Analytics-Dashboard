@@ -86,7 +86,7 @@ Missing-item auto-create:
 
 Item account sync (existing QB items):
 - Queue `createAdjustmentEvent` events with `createdBy` starting with `qb-item-account-sync`.
-- Middleware emits `ItemInventoryModRq` (using cached QB `ListID`/`EditSequence`) so Income/COGS/Asset accounts update on existing QB items.
+- Middleware emits `ItemInventoryModRq` (using cached QB `ListID`/`EditSequence`) so Income/COGS/Asset accounts update on existing QB items. If event lines include `itemSalesPrice` and/or `itemPurchaseCost`, those values are sent in the same ItemInventoryMod request.
 - Helper script:
 ```bash
 python execution/queue_qb_item_account_sync.py --prod --dry-run

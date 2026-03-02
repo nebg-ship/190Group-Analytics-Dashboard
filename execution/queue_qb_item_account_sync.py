@@ -2,9 +2,11 @@
 Queue QB item account sync events from parity mismatch output.
 
 This script reads a parity mismatch CSV and enqueues no-op `set` adjustments for
-SKUs with `income_account` and/or `cogs_account` mismatches. The QBWC middleware
-detects `createdBy=qb-item-account-sync*` events and emits `ItemInventoryModRq`
-instead of inventory adjustments, so item-level accounts can be updated in QB.
+SKUs with the requested mismatch fields. The QBWC middleware detects
+`createdBy=qb-item-account-sync*` events and emits `ItemInventoryModRq`
+instead of inventory adjustments. When mismatch fields include
+`income_account`, `cogs_account`, `asset_account`, `sales_price`, or
+`purchase_cost`, the corresponding values are sent to QB in the item mod.
 
 Usage:
   python execution/queue_qb_item_account_sync.py --prod --dry-run
@@ -139,7 +141,10 @@ def main() -> None:
     parser.add_argument(
         "--fields",
         default="income_account,cogs_account",
-        help="Comma-separated mismatch fields to include.",
+        help=(
+            "Comma-separated mismatch fields to include. "
+            "Supported: income_account, cogs_account, asset_account, sales_price, purchase_cost."
+        ),
     )
     parser.add_argument(
         "--location-code",

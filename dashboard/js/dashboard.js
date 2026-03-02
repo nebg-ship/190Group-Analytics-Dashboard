@@ -238,18 +238,22 @@ function updateDashboard() {
     if (!dashboardData.length) return;
 
     const filteredData = filterDataByRange(dashboardData, uiState);
-    const comparisonData = getComparisonData(filteredData, dashboardData, uiState);
-    const metrics = computeMetrics(filteredData, comparisonData, uiState);
+
+    // For KPIs and comparison, use completed weeks only in standard cumulative ranges (YTD, MTD, QTD)
+    // to ensure a fair "at this time" comparison with previous periods.
+    const kpiData = getKpiData(filteredData, uiState.dateRange);
+    const comparisonData = getComparisonData(kpiData, dashboardData, uiState);
+    const metrics = computeMetrics(kpiData, comparisonData, uiState);
     latestMetrics = metrics;
 
     renderKpis(metrics, uiState);
-    renderChannelMixChart(filteredData, uiState);
+    renderChannelMixChart(filteredData, uiState); // Chart still shows full trend including incomplete week
     renderWaterfallChart(metrics);
     renderDecompositionChart(metrics);
     renderChannelEfficiencyTable(metrics);
     renderDrivers(metrics, topSkuData);
-    updateTopSkuData(filteredData, comparisonData);
-    updateTopSkusChannelData(filteredData);
+    updateTopSkuData(kpiData, comparisonData);
+    updateTopSkusChannelData(kpiData);
     renderAlerts(metrics);
     renderPanelBreakdown(metrics);
     renderWholesaleCustomers(wholesaleCustomersData);
@@ -452,6 +456,33 @@ function filterDataByRange(data, state) {
         default:
             return sorted.filter(item => Number(item.year) === currentYear);
     }
+}
+
+/**
+ * Returns a subset of data excluding the current incomplete week for headline KPIs.
+ * This ensures fair comparisons for YTD/MTD/QTD views.
+ */
+function getKpiData(data, range) {
+    if (!data.length) return data;
+
+    if (['ytd', 'mtd', 'qtd'].includes(range)) {
+        const sorted = sortByDateDesc(data);
+        const latest = sorted[0];
+        const startOfThisWeek = getStartOfCurrentWeek();
+
+        if (latest.week_start === startOfThisWeek) {
+            return sorted.slice(1);
+        }
+    }
+    return data;
+}
+
+function getStartOfCurrentWeek() {
+    const now = new Date();
+    const day = now.getUTCDay();
+    const diff = (day === 0 ? -6 : 1) - day;
+    const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + diff));
+    return monday.toISOString().slice(0, 10);
 }
 
 function getComparisonData(selectedData, allData, state) {

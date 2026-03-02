@@ -92,6 +92,16 @@ Behavior:
 - Item drill-down: `inventory:getItemDetail`
 - Recent events: `inventory:listRecentEvents`
 
+### 4.1) Run parity audit (Convex vs QB)
+Run:
+```bash
+python execution/audit_convex_qb_parity.py --prod
+```
+
+Notes:
+- Audit uses `inventory:getOnHandTotalsBySku` (sums `inventory_balances` across locations).
+- Ensure latest Convex functions are deployed (`npx convex dev` or `convex run --push`).
+
 ### 5) Sync queue lifecycle
 - Poll next work: `qbQueue:getNextPendingQbEvent`
 - Mark work in progress: `qbQueue:markEventInFlight`
@@ -288,6 +298,9 @@ Outputs:
 6. `sendRequestXML` stays empty:
    - Confirm events exist in Convex with `qbStatus = pending`.
    - Confirm middleware can run Convex functions with current deployment/env file.
+7. `3140` invalid account reference during item account sync:
+   - Ensure `QB_ACCOUNTS_AUTO_CREATE=true` to auto-create missing accounts and retry.
+   - If the account name is incorrect, fix it in Convex and retry the event.
 
 ## Operational Notes
 - Batch 1 does not include the QBWC SOAP middleware yet.
