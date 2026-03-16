@@ -61,6 +61,7 @@
 
             <div class="header-right">
                 <div class="context-chip" id="lastUpdated">Data last refreshed: --</div>
+                <a class="icon-btn" href="#plSection" onclick="document.getElementById('plSection').scrollIntoView({behavior:'smooth'});return false;">P&amp;L</a>
                 <a class="icon-btn" href="/inventory">Inventory Ops</a>
                 <button class="icon-btn" id="notesBtn">Notes</button>
                 <button class="alert-btn" id="alertsBtn">
@@ -317,6 +318,80 @@
                     <canvas id="decompositionChart"></canvas>
                 </div>
             </section>
+            <!-- ── P&L Dashboard ─────────────────────────────────────── -->
+            <section class="layout-row pl-section" id="plSection">
+                <div class="card pl-card-full">
+                    <div class="card-header">
+                        <h3>P&amp;L Summary</h3>
+                        <span class="card-subtitle" id="plMonthLabel">Loading...</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="pl-table" id="plTable">
+                            <thead>
+                                <tr>
+                                    <th style="text-align:left">Line Item</th>
+                                    <th id="plColCurrentMonth">Current Month</th>
+                                    <th>Trailing 12M</th>
+                                    <th id="plColPY">Same Month PY</th>
+                                </tr>
+                            </thead>
+                            <tbody id="plTableBody">
+                                <tr><td colspan="4" class="panel-placeholder">Loading P&amp;L data...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <section class="layout-row two-col">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Monthly P&amp;L Waterfall</h3>
+                        <span class="card-subtitle" id="plWaterfallSubtitle">Current month bridge</span>
+                    </div>
+                    <canvas id="plWaterfallChart"></canvas>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Trailing 12M Margin Trend</h3>
+                        <span class="card-subtitle">Gross margin % and contribution margin %</span>
+                    </div>
+                    <canvas id="plMarginTrendChart"></canvas>
+                </div>
+            </section>
+
+            <section class="layout-row two-col">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Channel Contribution</h3>
+                        <span class="card-subtitle" id="plChannelSubtitle">Revenue vs. costs by channel</span>
+                    </div>
+                    <canvas id="plChannelChart"></canvas>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Variance to Prior Year</h3>
+                        <span class="card-subtitle">Current month vs. same month last year</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="pl-table" id="plVarianceTable">
+                            <thead>
+                                <tr>
+                                    <th style="text-align:left">Line Item</th>
+                                    <th>This Month</th>
+                                    <th>PY</th>
+                                    <th>$ Δ</th>
+                                    <th>% Δ</th>
+                                </tr>
+                            </thead>
+                            <tbody id="plVarianceBody">
+                                <tr><td colspan="5" class="panel-placeholder">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
         </main>
     </div>
 

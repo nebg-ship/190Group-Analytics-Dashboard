@@ -617,6 +617,186 @@ def get_sku_variations():
             'error': str(e)
         }), 500
 
+@app.route('/api/pl', methods=['GET'])
+def get_pl_data():
+    """Monthly P&L data: trailing 13 months (T12M + same-month prior year for variance)."""
+    try:
+        client = get_bigquery_client()
+
+        query = f"""
+        -- P&L Dashboard: Monthly grain, 13-month lookback
+        WITH months_spine AS (
+          SELECT month FROM UNNEST(GENERATE_DATE_ARRAY(
+            DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH),
+            DATE_TRUNC(CURRENT_DATE(), MONTH),
+            INTERVAL 1 MONTH
+          )) AS month
+        ),
+        amazon_monthly AS (
+          SELECT
+            DATE_TRUNC(business_date, MONTH) AS month,
+            ROUND(SUM(CAST(gross_sales AS FLOAT64)), 2) AS gross_sales,
+            ROUND(SUM(CAST(refunds AS FLOAT64)), 2) AS returns,
+            ROUND(SUM(CAST(net_sales AS FLOAT64)), 2) AS amazon_net_sales,
+            ROUND(SUM(CAST(amazon_fees AS FLOAT64)), 2) AS marketplace_fees,
+            ROUND(SUM(CAST(ad_spend AS FLOAT64)), 2) AS amazon_ad_spend,
+            ROUND(SUM(CAST(net_proceeds AS FLOAT64)), 2) AS net_proceeds,
+            SUM(units) AS units
+          FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_sku_day_us`
+          WHERE business_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH)
+          GROUP BY 1
+        ),
+        amazon_cogs_monthly AS (
+          SELECT
+            DATE_TRUNC(DATE(a.business_date), MONTH) AS month,
+            ROUND(SUM(
+              CASE
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * a.units
+                ELSE 0
+              END
+            ), 2) AS amazon_cogs
+          FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_sku_day_us` a
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c ON UPPER(a.msku) = UPPER(c.msku)
+          WHERE a.business_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH)
+          GROUP BY 1
+        ),
+        bonsai_monthly AS (
+          SELECT
+            DATE_TRUNC(DATE(order_created_date_time), MONTH) AS month,
+            ROUND(SUM(CAST(total_excluding_tax AS FLOAT64)), 2) AS bonsai_revenue,
+            COUNT(DISTINCT order_id) AS bonsai_orders
+          FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order`
+          WHERE DATE(order_created_date_time) >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH)
+            AND order_status_id IN (2, 10, 11, 3)
+          GROUP BY 1
+        ),
+        bonsai_cogs_monthly AS (
+          SELECT
+            DATE_TRUNC(DATE(o.order_created_date_time), MONTH) AS month,
+            ROUND(SUM(
+              CASE
+                WHEN CAST(li.base_cost_price AS FLOAT64) > 0 THEN CAST(li.base_cost_price AS FLOAT64) * li.quantity
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * li.quantity
+                ELSE 0
+              END
+            ), 2) AS bonsai_cogs
+          FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order_line_items` li
+          JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
+          JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c ON UPPER(p.sku) = UPPER(c.msku)
+          WHERE DATE(o.order_created_date_time) >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH)
+            AND o.order_status_id IN (2, 10, 11, 3)
+          GROUP BY 1
+        ),
+        wholesale_monthly AS (
+          SELECT
+            DATE_TRUNC(DATE(order_created_date_time), MONTH) AS month,
+            ROUND(SUM(IF(order_status_id IN (2, 10), CAST(sub_total_excluding_tax AS FLOAT64), 0)), 2) AS wholesale_revenue
+          FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order`
+          WHERE DATE(order_created_date_time) >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH)
+            AND order_status_id NOT IN (0, 5, 6)
+          GROUP BY 1
+        ),
+        wholesale_cogs_monthly AS (
+          SELECT
+            DATE_TRUNC(DATE(o.order_created_date_time), MONTH) AS month,
+            ROUND(SUM(
+              CASE
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * li.quantity
+                WHEN CAST(li.base_cost_price AS FLOAT64) > 0 THEN CAST(li.base_cost_price AS FLOAT64) * li.quantity
+                ELSE 0
+              END
+            ), 2) AS wholesale_cogs
+          FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order_line_items` li
+          JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order` o ON li.order_id = o.order_id
+          LEFT JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_product` p ON li.product_id = p.product_id
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c ON UPPER(p.sku) = UPPER(c.msku)
+          WHERE DATE(o.order_created_date_time) >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH)
+            AND o.order_status_id NOT IN (0, 5, 6)
+          GROUP BY 1
+        ),
+        google_ads_monthly AS (
+          SELECT
+            DATE_TRUNC(DATE(segments_date), MONTH) AS month,
+            ROUND(SUM(CAST(metrics_cost_micros AS FLOAT64)) / 1000000, 2) AS google_ad_spend
+          FROM `{PROJECT_ID}.{GOOGLE_ADS_DATASET}.p_ads_CampaignStats_*`
+          WHERE segments_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH), MONTH)
+          GROUP BY 1
+        )
+        SELECT
+          FORMAT_DATE('%Y-%m', m.month) AS month,
+          -- Revenue by channel
+          COALESCE(a.gross_sales, 0)          AS amazon_gross_sales,
+          COALESCE(a.returns, 0)              AS amazon_returns,
+          COALESCE(b.bonsai_revenue, 0)       AS bonsai_revenue,
+          COALESCE(wh.wholesale_revenue, 0)   AS wholesale_revenue,
+          -- Combined top-line
+          ROUND(COALESCE(a.gross_sales, 0) + COALESCE(b.bonsai_revenue, 0) + COALESCE(wh.wholesale_revenue, 0), 2) AS gross_sales,
+          -- Returns (Amazon only; Bonsai/Wholesale not connected)
+          COALESCE(a.returns, 0) AS returns,
+          -- Net sales
+          ROUND(COALESCE(a.gross_sales, 0) + COALESCE(a.returns, 0) + COALESCE(b.bonsai_revenue, 0) + COALESCE(wh.wholesale_revenue, 0), 2) AS net_sales,
+          -- COGS by channel
+          COALESCE(ac.amazon_cogs, 0)         AS amazon_cogs,
+          COALESCE(bc.bonsai_cogs, 0)         AS bonsai_cogs,
+          COALESCE(wc.wholesale_cogs, 0)      AS wholesale_cogs,
+          ROUND(COALESCE(ac.amazon_cogs, 0) + COALESCE(bc.bonsai_cogs, 0) + COALESCE(wc.wholesale_cogs, 0), 2) AS cogs,
+          -- Gross profit
+          ROUND(
+            (COALESCE(a.gross_sales, 0) + COALESCE(a.returns, 0) + COALESCE(b.bonsai_revenue, 0) + COALESCE(wh.wholesale_revenue, 0))
+            - (COALESCE(ac.amazon_cogs, 0) + COALESCE(bc.bonsai_cogs, 0) + COALESCE(wc.wholesale_cogs, 0)),
+          2) AS gross_profit,
+          -- Variable costs (amazon_fees is typically negative in SP-API data)
+          COALESCE(a.marketplace_fees, 0)     AS marketplace_fees,
+          COALESCE(a.amazon_ad_spend, 0)      AS amazon_ad_spend,
+          COALESCE(g.google_ad_spend, 0)      AS google_ad_spend,
+          ROUND(COALESCE(a.amazon_ad_spend, 0) + COALESCE(g.google_ad_spend, 0), 2) AS ad_spend,
+          -- Contribution profit (partial: excl. variable fulfillment, payment fees)
+          ROUND(
+            (COALESCE(a.gross_sales, 0) + COALESCE(a.returns, 0) + COALESCE(b.bonsai_revenue, 0) + COALESCE(wh.wholesale_revenue, 0))
+            - (COALESCE(ac.amazon_cogs, 0) + COALESCE(bc.bonsai_cogs, 0) + COALESCE(wc.wholesale_cogs, 0))
+            + COALESCE(a.marketplace_fees, 0)
+            - (COALESCE(a.amazon_ad_spend, 0) + COALESCE(g.google_ad_spend, 0)),
+          2) AS contribution_profit_partial,
+          -- Amazon net proceeds (sanity check field)
+          COALESCE(a.net_proceeds, 0)         AS amazon_net_proceeds,
+          COALESCE(a.units, 0)                AS amazon_units
+        FROM months_spine m
+        LEFT JOIN amazon_monthly a       ON m.month = a.month
+        LEFT JOIN amazon_cogs_monthly ac ON m.month = ac.month
+        LEFT JOIN bonsai_monthly b       ON m.month = b.month
+        LEFT JOIN bonsai_cogs_monthly bc ON m.month = bc.month
+        LEFT JOIN wholesale_monthly wh   ON m.month = wh.month
+        LEFT JOIN wholesale_cogs_monthly wc ON m.month = wc.month
+        LEFT JOIN google_ads_monthly g   ON m.month = g.month
+        ORDER BY m.month DESC
+        """
+
+        results = client.query(query).result()
+        months = []
+        for row in results:
+            r = dict(row)
+            net_sales = r.get('net_sales') or 0
+            gross_profit = r.get('gross_profit') or 0
+            contrib = r.get('contribution_profit_partial') or 0
+            r['gross_margin_pct'] = round((gross_profit / net_sales * 100), 1) if net_sales else 0
+            r['contribution_margin_pct'] = round((contrib / net_sales * 100), 1) if net_sales else 0
+            months.append(r)
+
+        return jsonify({
+            'success': True,
+            'months': months,
+            'current_month': months[0] if months else None,
+            'timestamp': datetime.now().isoformat()
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @app.route('/')
 def serve_dashboard():
     """Serve the main dashboard HTML"""

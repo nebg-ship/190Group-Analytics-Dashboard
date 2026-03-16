@@ -46,6 +46,7 @@ const KPI_CONFIG = {
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     loadDashboardData();
+    loadPLData();
     toggleCustomerTypeVisibility(uiState.channel);
 });
 
@@ -1396,4 +1397,450 @@ function hexToRgba(hex, alpha) {
     const g = (bigint >> 8) & 255;
     const b = bigint & 255;
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// ── P&L Dashboard ────────────────────────────────────────────────
+
+const PL_API_URL = 'http://localhost:5000/api/pl';
+let plData = null;
+
+async function loadPLData() {
+    try {
+        const response = await fetch(PL_API_URL);
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || 'P&L API error');
+        plData = result;
+        renderPLTable(result);
+        renderPLWaterfall(result);
+        renderPLMarginTrend(result);
+        renderPLChannelChart(result);
+        renderPLVarianceTable(result);
+    } catch (err) {
+        console.error('P&L load error:', err);
+        const tbody = document.getElementById('plTableBody');
+        if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="panel-placeholder">Failed to load P&L data: ' + err.message + '</td></tr>';
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+function plFmt(v) {
+    if (v === null || v === undefined) return 'Not Connected';
+    return formatCurrency(v);
+}
+
+function plFmtDeduct(v) {
+    if (v === null || v === undefined) return 'Not Connected';
+    const abs = Math.abs(v);
+    return abs === 0 ? '—' : '(' + formatCurrency(abs) + ')';
+}
+
+function plFmtPct(v) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    return v.toFixed(1) + '%';
+}
+
+function plVariancePct(current, py) {
+    if (!py || py === 0) return null;
+    return ((current - py) / Math.abs(py)) * 100;
+}
+
+// T12M: sum field across first 12 months (index 0..11, most-recent first)
+function plT12Sum(months, field) {
+    return months.slice(0, 12).reduce((acc, m) => acc + (m[field] || 0), 0);
+}
+
+function plFindSameMonthPY(months, currentMonth) {
+    const parts = currentMonth.split('-');
+    const pyYear = String(parseInt(parts[0]) - 1);
+    const pyKey = pyYear + '-' + parts[1];
+    return months.find(function(m) { return m.month === pyKey; }) || null;
+}
+
+// ── P&L Summary Table ────────────────────────────────────────────
+
+function renderPLTable(result) {
+    const months = result.months || [];
+    const cur = result.current_month;
+    if (!cur) return;
+
+    const monthLabel = new Date(cur.month + '-02').toLocaleString('en-US', { month: 'long', year: 'numeric' });
+    const el = document.getElementById('plMonthLabel');
+    if (el) el.textContent = monthLabel;
+    const thCur = document.getElementById('plColCurrentMonth');
+    if (thCur) thCur.textContent = monthLabel;
+
+    const py = plFindSameMonthPY(months, cur.month);
+    const pyLabel = py ? new Date(py.month + '-02').toLocaleString('en-US', { month: 'long', year: 'numeric' }) : 'Prior Year';
+    const thPY = document.getElementById('plColPY');
+    if (thPY) thPY.textContent = pyLabel;
+
+    const t12 = {
+        gross_sales: plT12Sum(months, 'gross_sales'),
+        returns: plT12Sum(months, 'returns'),
+        net_sales: plT12Sum(months, 'net_sales'),
+        cogs: plT12Sum(months, 'cogs'),
+        gross_profit: plT12Sum(months, 'gross_profit'),
+        marketplace_fees: plT12Sum(months, 'marketplace_fees'),
+        ad_spend: plT12Sum(months, 'ad_spend'),
+        contribution_profit_partial: plT12Sum(months, 'contribution_profit_partial'),
+    };
+    t12.gross_margin_pct = t12.net_sales ? (t12.gross_profit / t12.net_sales * 100) : 0;
+    t12.contribution_margin_pct = t12.net_sales ? (t12.contribution_profit_partial / t12.net_sales * 100) : 0;
+
+    function pyCell(py_v, fmt) {
+        return py_v !== null && py_v !== undefined ? fmt(py_v) : 'Not Connected';
+    }
+
+    function revenueRow(label, curV, t12V, pyV) {
+        return '<tr class="pl-row-deduct"><td style="padding-left:0.75rem;color:var(--text-secondary)">' + label + '</td>' +
+            '<td>' + plFmt(curV) + '</td>' +
+            '<td>' + plFmt(t12V) + '</td>' +
+            '<td>' + pyCell(pyV, plFmt) + '</td></tr>';
+    }
+
+    function deductRow(label, curV, t12V, pyV) {
+        return '<tr class="pl-row-deduct"><td>' + label + '</td>' +
+            '<td>' + plFmtDeduct(curV) + '</td>' +
+            '<td>' + plFmtDeduct(t12V) + '</td>' +
+            '<td>' + pyCell(pyV, plFmtDeduct) + '</td></tr>';
+    }
+
+    function totalRow(label, curV, t12V, pyV, badgeClass, pctCur) {
+        const badge = pctCur !== null ? '<span class="pl-badge ' + badgeClass + '">' + plFmtPct(pctCur) + '</span>' : '';
+        return '<tr class="pl-row-total"><td>' + label + badge + '</td>' +
+            '<td>' + plFmt(curV) + '</td>' +
+            '<td>' + plFmt(t12V) + '</td>' +
+            '<td>' + pyCell(pyV, plFmt) + '</td></tr>';
+    }
+
+    function stubRow(label) {
+        return '<tr class="pl-row-stub"><td>' + label + '</td><td>Not Connected</td><td>Not Connected</td><td>Not Connected</td></tr>';
+    }
+
+    function sectionLabel(text) {
+        return '<tr class="pl-section-label"><td colspan="4">' + text + '</td></tr>';
+    }
+
+    const py_gs   = py ? py.gross_sales : null;
+    const py_ret  = py ? py.returns : null;
+    const py_net  = py ? py.net_sales : null;
+    const py_cogs = py ? py.cogs : null;
+    const py_gp   = py ? py.gross_profit : null;
+    const py_fees = py ? Math.abs(py.marketplace_fees || 0) : null;
+    const py_ad   = py ? py.ad_spend : null;
+    const py_cont = py ? py.contribution_profit_partial : null;
+
+    const rows = [
+        sectionLabel('Revenue'),
+        revenueRow('Gross Sales', cur.gross_sales, t12.gross_sales, py_gs),
+        deductRow('− Returns (Amazon)', cur.returns, t12.returns, py_ret),
+        '<tr class="pl-row-stub"><td style="padding-left:1.5rem;font-style:italic;font-size:0.82rem">− Returns (Bonsai / Wholesale)</td><td>Not Connected</td><td>Not Connected</td><td>Not Connected</td></tr>',
+        totalRow('Net Sales', cur.net_sales, t12.net_sales, py_net, '', null),
+
+        sectionLabel('Gross Profit'),
+        deductRow('− COGS', cur.cogs, t12.cogs, py_cogs),
+        totalRow('Gross Profit', cur.gross_profit, t12.gross_profit, py_gp, 'pl-badge-gross', cur.gross_margin_pct),
+
+        sectionLabel('Contribution Profit'),
+        deductRow('− Marketplace Fees (Amazon)', Math.abs(cur.marketplace_fees || 0), Math.abs(t12.marketplace_fees), py_fees),
+        deductRow('− Ad Spend', cur.ad_spend, t12.ad_spend, py_ad),
+        stubRow('− Variable Fulfillment Cost'),
+        stubRow('− Payment Processing Fees'),
+        totalRow('Contribution Profit', cur.contribution_profit_partial, t12.contribution_profit_partial, py_cont, 'pl-badge-contribution', cur.contribution_margin_pct),
+
+        sectionLabel('Operating Profit'),
+        stubRow('− Payroll'),
+        stubRow('− Fixed Overhead'),
+        '<tr class="pl-row-total"><td>EBITDA / Operating Profit <span class="pl-badge pl-badge-operating">Not Connected</span></td><td>—</td><td>—</td><td>—</td></tr>',
+    ];
+
+    document.getElementById('plTableBody').innerHTML = rows.join('');
+}
+
+// ── Waterfall Chart ──────────────────────────────────────────────
+
+function renderPLWaterfall(result) {
+    const cur = result.current_month;
+    if (!cur) return;
+
+    const grossSales = cur.gross_sales || 0;
+    const returns    = cur.returns || 0;      // negative
+    const netSales   = cur.net_sales || 0;
+    const cogs       = cur.cogs || 0;
+    const grossProfit= cur.gross_profit || 0;
+    const mktFees    = Math.abs(cur.marketplace_fees || 0);
+    const adSpend    = cur.ad_spend || 0;
+    const contrib    = cur.contribution_profit_partial || 0;
+
+    const returnsStart = grossSales + returns;  // = netSales
+    const cogsStart    = netSales - cogs;       // = grossProfit
+    const feesStart    = grossProfit - mktFees;
+    const adStart      = feesStart - adSpend;   // = contrib
+
+    const labels = ['Gross Sales', 'Returns', 'Net Sales', 'COGS', 'Gross Profit', 'Mkt Fees', 'Ad Spend', 'Contribution'];
+    const data = [
+        [0, grossSales],
+        [returnsStart, grossSales],
+        [0, netSales],
+        [cogsStart, netSales],
+        [0, grossProfit],
+        [feesStart, grossProfit],
+        [adStart, feesStart],
+        [0, contrib],
+    ];
+    const isTotals = [false, false, true, false, true, false, false, true];
+    const posColors  = ['#22c55e', '#ef4444', '#f59e0b', '#ef4444', '#22c55e', '#ef4444', '#ef4444', '#22d3ee'];
+
+    const ctx = document.getElementById('plWaterfallChart');
+    if (!ctx) return;
+    if (charts.plWaterfall) { charts.plWaterfall.destroy(); delete charts.plWaterfall; }
+
+    charts.plWaterfall = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                data: data,
+                backgroundColor: posColors.map(function(c, i) {
+                    return isTotals[i] ? c : c + 'bb';
+                }),
+                borderColor: posColors,
+                borderWidth: 1,
+                borderRadius: 4,
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: function(ctx) {
+                            const val = ctx.raw;
+                            return ' ' + formatCurrency(Math.abs(val[1] - val[0]));
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { ticks: { color: '#9aa6bd', font: { size: 10 } }, grid: { display: false } },
+                y: {
+                    ticks: { color: '#9aa6bd', font: { size: 10 }, callback: function(v) { return formatCurrency(v); } },
+                    grid: { color: 'rgba(148,163,184,0.1)' }
+                }
+            }
+        }
+    });
+
+    const subtitle = document.getElementById('plWaterfallSubtitle');
+    if (subtitle && cur.month) {
+        const label = new Date(cur.month + '-02').toLocaleString('en-US', { month: 'long', year: 'numeric' });
+        subtitle.textContent = label + ' bridge';
+    }
+}
+
+// ── Margin Trend Chart ───────────────────────────────────────────
+
+function renderPLMarginTrend(result) {
+    const months = (result.months || []).slice(0, 12).reverse();
+    if (!months.length) return;
+
+    const labels = months.map(function(m) {
+        return new Date(m.month + '-02').toLocaleString('en-US', { month: 'short', year: '2-digit' });
+    });
+    const grossPcts  = months.map(function(m) { return m.gross_margin_pct || 0; });
+    const contribPcts = months.map(function(m) { return m.contribution_margin_pct || 0; });
+
+    const ctx = document.getElementById('plMarginTrendChart');
+    if (!ctx) return;
+    if (charts.plMarginTrend) { charts.plMarginTrend.destroy(); delete charts.plMarginTrend; }
+
+    charts.plMarginTrend = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Gross Margin %',
+                    data: grossPcts,
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245,158,11,0.08)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#f59e0b',
+                    borderWidth: 2,
+                },
+                {
+                    label: 'Contribution Margin %',
+                    data: contribPcts,
+                    borderColor: '#22d3ee',
+                    backgroundColor: 'rgba(34,211,238,0.06)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#22d3ee',
+                    borderWidth: 2,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#9aa6bd', font: { size: 11 }, boxWidth: 12 } },
+                tooltip: {
+                    callbacks: {
+                        label: function(ctx) { return ' ' + ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + '%'; }
+                    }
+                }
+            },
+            scales: {
+                x: { ticks: { color: '#9aa6bd', font: { size: 10 } }, grid: { display: false } },
+                y: {
+                    ticks: { color: '#9aa6bd', font: { size: 10 }, callback: function(v) { return v + '%'; } },
+                    grid: { color: 'rgba(148,163,184,0.1)' }
+                }
+            }
+        }
+    });
+}
+
+// ── Channel Contribution Chart ───────────────────────────────────
+
+function renderPLChannelChart(result) {
+    const cur = result.current_month;
+    if (!cur) return;
+
+    const ctx = document.getElementById('plChannelChart');
+    if (!ctx) return;
+    if (charts.plChannel) { charts.plChannel.destroy(); delete charts.plChannel; }
+
+    charts.plChannel = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['Amazon', 'Bonsai Outlet', 'Wholesale'],
+            datasets: [
+                {
+                    label: 'Revenue',
+                    data: [cur.amazon_gross_sales || 0, cur.bonsai_revenue || 0, cur.wholesale_revenue || 0],
+                    backgroundColor: 'rgba(34,197,94,0.7)',
+                    borderColor: '#22c55e',
+                    borderWidth: 1,
+                    borderRadius: 4,
+                },
+                {
+                    label: 'COGS',
+                    data: [-(cur.amazon_cogs || 0), -(cur.bonsai_cogs || 0), -(cur.wholesale_cogs || 0)],
+                    backgroundColor: 'rgba(239,68,68,0.55)',
+                    borderColor: '#ef4444',
+                    borderWidth: 1,
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Fees (Amazon)',
+                    data: [-Math.abs(cur.marketplace_fees || 0), 0, 0],
+                    backgroundColor: 'rgba(249,115,22,0.55)',
+                    borderColor: '#f97316',
+                    borderWidth: 1,
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Ad Spend',
+                    data: [-(cur.amazon_ad_spend || 0), -(cur.google_ad_spend || 0), 0],
+                    backgroundColor: 'rgba(139,92,246,0.55)',
+                    borderColor: '#8b5cf6',
+                    borderWidth: 1,
+                    borderRadius: 4,
+                },
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { labels: { color: '#9aa6bd', font: { size: 11 }, boxWidth: 12 } },
+                tooltip: {
+                    callbacks: {
+                        label: function(ctx) { return ' ' + ctx.dataset.label + ': ' + formatCurrency(Math.abs(ctx.parsed.y)); }
+                    }
+                }
+            },
+            scales: {
+                x: { stacked: true, ticks: { color: '#9aa6bd', font: { size: 11 } }, grid: { display: false } },
+                y: {
+                    stacked: true,
+                    ticks: { color: '#9aa6bd', font: { size: 10 }, callback: function(v) { return formatCurrency(Math.abs(v)); } },
+                    grid: { color: 'rgba(148,163,184,0.1)' }
+                }
+            }
+        }
+    });
+
+    const sub = document.getElementById('plChannelSubtitle');
+    if (sub && cur.month) {
+        const label = new Date(cur.month + '-02').toLocaleString('en-US', { month: 'long', year: 'numeric' });
+        sub.textContent = label + ' — revenue vs. costs by channel';
+    }
+}
+
+// ── Variance Table ───────────────────────────────────────────────
+
+function renderPLVarianceTable(result) {
+    const months = result.months || [];
+    const cur = result.current_month;
+    if (!cur) return;
+
+    const py = plFindSameMonthPY(months, cur.month);
+
+    // [label, curField, isCost] — isCost=true means lower is better
+    const rowDefs = [
+        ['Gross Sales',         'gross_sales',                false],
+        ['Returns (Amazon)',    'returns_abs',                true],
+        ['Net Sales',          'net_sales',                  false],
+        ['COGS',               'cogs',                       true],
+        ['Gross Profit',       'gross_profit',               false],
+        ['Marketplace Fees',   'marketplace_fees_abs',       true],
+        ['Ad Spend',           'ad_spend',                   true],
+        ['Contribution Profit','contribution_profit_partial', false],
+    ];
+
+    // Extend cur and py with abs fields
+    function extendRow(r) {
+        if (!r) return null;
+        return Object.assign({}, r, {
+            returns_abs: Math.abs(r.returns || 0),
+            marketplace_fees_abs: Math.abs(r.marketplace_fees || 0),
+        });
+    }
+
+    const curExt = extendRow(cur);
+    const pyExt  = extendRow(py);
+
+    const trs = rowDefs.map(function(def) {
+        const label  = def[0];
+        const field  = def[1];
+        const isCost = def[2];
+        const cv = curExt ? (curExt[field] !== undefined ? curExt[field] : null) : null;
+        const pv = pyExt  ? (pyExt[field]  !== undefined ? pyExt[field]  : null) : null;
+
+        const delta = (cv !== null && pv !== null) ? cv - pv : null;
+        const pct   = (delta !== null && pv && pv !== 0) ? ((cv - pv) / Math.abs(pv)) * 100 : null;
+
+        const fmtV  = isCost ? plFmtDeduct : plFmt;
+        const cvStr = cv !== null ? fmtV(cv) : '—';
+        const pvStr = pv !== null ? fmtV(pv) : 'N/A';
+
+        let deltaStr = '—', pctStr = '—', pctClass = '';
+        if (delta !== null) {
+            deltaStr = delta >= 0 ? ('+' + formatCurrency(delta)) : ('(' + formatCurrency(Math.abs(delta)) + ')');
+            const favorable = isCost ? (delta < 0) : (delta > 0);
+            pctClass = favorable ? 'pl-positive' : 'pl-negative';
+            pctStr = pct !== null ? (pct >= 0 ? ('+' + pct.toFixed(1) + '%') : (pct.toFixed(1) + '%')) : '—';
+        }
+
+        return '<tr><td>' + label + '</td><td>' + cvStr + '</td><td>' + pvStr + '</td><td>' + deltaStr + '</td><td class="' + pctClass + '">' + pctStr + '</td></tr>';
+    });
+
+    document.getElementById('plVarianceBody').innerHTML = trs.join('');
 }
