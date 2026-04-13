@@ -2,6 +2,7 @@
 
 const API_URL = '/api/dashboard';
 const TOP_SKU_URL = '/api/top-sku';
+const TOP_CATEGORY_URL = '/api/top-categories';
 const NOTES_STORAGE_KEY = 'executive_notes_v1';
 
 let dashboardData = [];
@@ -11,8 +12,11 @@ let currentAlerts = [];
 let latestMetrics = null;
 let topSkuData = null;
 let topSkuRequestKey = null;
+let topCategoryData = null;
+let topCategoryRequestKey = null;
 let wholesaleCustomersData = [];
 const topSkuCache = new Map();
+const topCategoryCache = new Map();
 
 const uiState = {
     dateRange: 'ytd',
@@ -203,6 +207,9 @@ function switchPanelTab(tab) {
     if (tab === 'notes') {
         renderNotes();
     }
+    if (tab === 'category') {
+        renderCategoryBreakdown(topCategoryData);
+    }
     if (tab === 'variations') {
         // Handled by handleSkuClick, but can re-render if we have active product
     }
@@ -265,11 +272,13 @@ function updateDashboard() {
     renderWaterfallChart(metrics);
     renderDecompositionChart(metrics);
     renderChannelEfficiencyTable(metrics);
-    renderDrivers(metrics, topSkuData);
+    renderDrivers(metrics, topSkuData, topCategoryData);
     updateTopSkuData(kpiData, comparisonData, metricGrain);
+    updateTopCategoryData(kpiData, comparisonData, metricGrain);
     updateTopSkusChannelData(kpiData, metricGrain);
     renderAlerts(metrics);
     renderPanelBreakdown(metrics);
+    renderCategoryBreakdown(topCategoryData);
     renderWholesaleCustomers(wholesaleCustomersData);
 }
 
@@ -335,6 +344,48 @@ function renderSkuList(containerId, items) {
     }).join('');
 }
 
+function renderTopCategories(result) {
+    const container = document.getElementById('topCategoriesList');
+    if (!container) return;
+
+    if (!result) {
+        container.innerHTML = '<div class="panel-placeholder">Loading top categories...</div>';
+        return;
+    }
+
+    if (result.error) {
+        container.innerHTML = `<div class="panel-placeholder">Failed to load categories: ${escapeHtml(result.error)}</div>`;
+        return;
+    }
+
+    const items = Array.isArray(result.data) ? result.data.slice(0, 5) : [];
+    if (!items.length) {
+        container.innerHTML = '<div class="panel-placeholder">No mapped category revenue for this period</div>';
+        return;
+    }
+
+    container.innerHTML = items.map((item, index) => {
+        const revenue = formatCurrency(item.revenue || 0);
+        const delta = formatSignedCurrency(item.delta || 0);
+        const deltaClass = (item.delta || 0) >= 0 ? 'positive' : 'negative';
+        const units = formatNumber(item.units || 0);
+
+        return `
+            <div class="category-item">
+                <div class="sku-rank">#${index + 1}</div>
+                <div class="sku-info">
+                    <div class="category-name">${escapeHtml(item.category)}</div>
+                    <div class="sku-code">${units} units | ${item.sku_count || 0} SKUs</div>
+                </div>
+                <div class="sku-stats">
+                    <div class="sku-rev">${revenue}</div>
+                    <div class="sku-units ${deltaClass}">${delta}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
 function renderWholesaleCustomers(customers) {
     const tbody = document.getElementById('wholesaleCustomersBody');
     if (!tbody) return;
@@ -375,14 +426,14 @@ function updateTopSkuData(filteredData, comparisonData, grain = 'week') {
 
     if (topSkuCache.has(requestKey)) {
         topSkuData = topSkuCache.get(requestKey);
-        renderDrivers(latestMetrics, topSkuData);
+        renderDrivers(latestMetrics, topSkuData, topCategoryData);
         return;
     }
 
     if (topSkuRequestKey === requestKey) return;
     topSkuRequestKey = requestKey;
     topSkuData = null;
-    renderDrivers(latestMetrics, topSkuData);
+    renderDrivers(latestMetrics, topSkuData, topCategoryData);
 
     fetchTopSku(currentRange, comparisonRange, requestKey);
 }
@@ -406,12 +457,78 @@ async function fetchTopSku(currentRange, comparisonRange, requestKey) {
         if (topSkuRequestKey !== requestKey) return;
         topSkuData = result.top_sku || null;
         topSkuCache.set(requestKey, topSkuData);
-        renderDrivers(latestMetrics, topSkuData);
+        renderDrivers(latestMetrics, topSkuData, topCategoryData);
     } catch (error) {
         console.error('Error loading top SKU:', error);
         if (topSkuRequestKey === requestKey) {
             topSkuData = null;
-            renderDrivers(latestMetrics, topSkuData);
+            renderDrivers(latestMetrics, topSkuData, topCategoryData);
+        }
+    }
+}
+
+function updateTopCategoryData(filteredData, comparisonData, grain = 'week') {
+    const currentRange = getWeekRange(filteredData, grain);
+    if (!currentRange) return;
+    const comparisonRange = getWeekRange(comparisonData, grain);
+
+    const requestKey = [
+        currentRange.start,
+        currentRange.end,
+        comparisonRange ? comparisonRange.start : '',
+        comparisonRange ? comparisonRange.end : '',
+        uiState.channel
+    ].join('|');
+
+    if (topCategoryCache.has(requestKey)) {
+        topCategoryData = topCategoryCache.get(requestKey);
+        renderDrivers(latestMetrics, topSkuData, topCategoryData);
+        renderTopCategories(topCategoryData);
+        renderCategoryBreakdown(topCategoryData);
+        return;
+    }
+
+    if (topCategoryRequestKey === requestKey) return;
+    topCategoryRequestKey = requestKey;
+    topCategoryData = null;
+    renderDrivers(latestMetrics, topSkuData, topCategoryData);
+    renderTopCategories(null);
+    renderCategoryBreakdown(null);
+
+    fetchTopCategories(currentRange, comparisonRange, requestKey);
+}
+
+async function fetchTopCategories(currentRange, comparisonRange, requestKey) {
+    const params = new URLSearchParams({
+        start: currentRange.start,
+        end: currentRange.end,
+        channel: uiState.channel,
+        limit: '8'
+    });
+    if (comparisonRange && comparisonRange.start && comparisonRange.end) {
+        params.set('compare_start', comparisonRange.start);
+        params.set('compare_end', comparisonRange.end);
+    }
+
+    try {
+        const response = await fetch(`${TOP_CATEGORY_URL}?${params.toString()}`);
+        const result = await response.json();
+        if (!result.success) {
+            throw new Error(result.error || 'Failed to fetch top categories');
+        }
+        if (topCategoryRequestKey !== requestKey) return;
+        topCategoryData = result;
+        topCategoryCache.set(requestKey, result);
+        renderDrivers(latestMetrics, topSkuData, topCategoryData);
+        renderTopCategories(topCategoryData);
+        renderCategoryBreakdown(topCategoryData);
+    } catch (error) {
+        console.error('Error loading top categories:', error);
+        if (topCategoryRequestKey === requestKey) {
+            topCategoryData = { success: false, error: error.message, data: [] };
+            renderDrivers(latestMetrics, topSkuData, topCategoryData);
+            renderTopCategories(topCategoryData);
+            renderCategoryBreakdown(topCategoryData);
         }
     }
 }
@@ -904,18 +1021,19 @@ function renderChannelEfficiencyTable(metrics) {
     });
 }
 
-function renderDrivers(metrics, topSku) {
+function renderDrivers(metrics, topSku, topCategories) {
     const hasTopSku = topSku && topSku.sku;
     const topSkuDriver = hasTopSku
         ? makeTopSkuDriver(topSku)
         : makePlaceholderDriver(topSku ? 'Top SKU (No data)' : 'Top SKU');
+    const categoryDrivers = makeTopCategoryDrivers(topCategories);
 
     const drivers = [
         makeDriver('Amazon', metrics.currentTotals.channels.amazon.revenue, metrics.previousTotals.channels.amazon.revenue),
         makeDriver('Online Storefront', metrics.currentTotals.channels.bonsai.revenue, metrics.previousTotals.channels.bonsai.revenue),
         makeDriver('Wholesale', metrics.currentTotals.channels.wholesale.revenue, metrics.previousTotals.channels.wholesale.revenue),
         topSkuDriver,
-        makePlaceholderDriver('Top Category')
+        ...categoryDrivers
     ];
 
     const positive = drivers.filter(d => d.delta >= 0).sort((a, b) => b.delta - a.delta).slice(0, 5);
@@ -945,6 +1063,39 @@ function makeTopSkuDriver(topSku) {
     };
 }
 
+function makeTopCategoryDrivers(topCategories) {
+    if (!topCategories) {
+        return [makePlaceholderDriver('Top Category')];
+    }
+    if (topCategories.error) {
+        return [makePlaceholderDriver('Top Category', 'Unavailable')];
+    }
+
+    const drivers = [];
+    if (topCategories.top_positive) {
+        drivers.push(makeTopCategoryDriver(topCategories.top_positive));
+    }
+    if (
+        topCategories.top_negative
+        && (!topCategories.top_positive || topCategories.top_negative.category !== topCategories.top_positive.category)
+    ) {
+        drivers.push(makeTopCategoryDriver(topCategories.top_negative));
+    }
+    if (!drivers.length && Array.isArray(topCategories.data) && topCategories.data.length) {
+        drivers.push(makeTopCategoryDriver(topCategories.data[0]));
+    }
+    return drivers.length ? drivers : [makePlaceholderDriver('Top Category', 'No data')];
+}
+
+function makeTopCategoryDriver(category) {
+    return {
+        label: `Top Category: ${category.category}`,
+        delta: category.delta || 0,
+        metric: 'net_revenue',
+        tab: 'category'
+    };
+}
+
 function makePlaceholderDriver(label, valueLabel = 'Not Connected') {
     return {
         label,
@@ -969,9 +1120,12 @@ function renderDriverList(id, drivers) {
         const item = document.createElement('li');
         item.className = 'driver-item';
         item.dataset.metric = driver.metric;
+        if (driver.tab) {
+            item.dataset.tab = driver.tab;
+        }
         item.innerHTML = `
-            <div>${driver.label}</div>
-            <div class="driver-value">${driver.placeholder ? driver.placeholderValue : formatCurrency(driver.delta)}</div>
+            <div>${escapeHtml(driver.label)}</div>
+            <div class="driver-value">${driver.placeholder ? escapeHtml(driver.placeholderValue) : formatCurrency(driver.delta)}</div>
         `;
         container.appendChild(item);
     });
@@ -1113,6 +1267,58 @@ function renderMarketingBreakdown(metrics) {
     });
 }
 
+function renderCategoryBreakdown(result) {
+    const list = document.getElementById('panelCategoryBreakdown');
+    const meta = document.getElementById('panelCategoryMeta');
+    if (!list) return;
+
+    if (!result) {
+        list.innerHTML = '<div class="panel-placeholder">Loading category breakdown...</div>';
+        if (meta) meta.textContent = 'Convex income account categories';
+        return;
+    }
+
+    if (result.error) {
+        list.innerHTML = `<div class="panel-placeholder">Failed to load categories: ${escapeHtml(result.error)}</div>`;
+        if (meta) meta.textContent = 'Convex income account categories';
+        return;
+    }
+
+    const rows = Array.isArray(result.data) ? result.data : [];
+    if (!rows.length) {
+        list.innerHTML = '<div class="panel-placeholder">No mapped category revenue for this period</div>';
+    } else {
+        list.innerHTML = rows.map(row => {
+            const delta = row.delta || 0;
+            const deltaClass = delta >= 0 ? 'positive' : 'negative';
+            const gmText = row.gm_pct === null || row.gm_pct === undefined
+                ? 'GM N/A'
+                : `GM ${formatPercent(row.gm_pct)}`;
+
+            return `
+                <li class="panel-item category-panel-item">
+                    <div class="panel-item-main">
+                        <div class="panel-item-label">${escapeHtml(row.category)}</div>
+                        <div class="panel-meta">${formatNumber(row.units || 0)} units | ${row.sku_count || 0} SKUs | ${gmText}</div>
+                    </div>
+                    <div class="panel-item-values">
+                        <div class="driver-value">${formatCurrency(row.revenue || 0)}</div>
+                        <div class="panel-meta ${deltaClass}">${formatSignedCurrency(delta)}</div>
+                    </div>
+                </li>
+            `;
+        }).join('');
+    }
+
+    if (meta) {
+        const coverage = result.coverage || {};
+        const matchedPct = coverage.matched_revenue_pct ?? 0;
+        const matchedSkus = coverage.matched_skus ?? 0;
+        const totalSkus = coverage.total_skus ?? 0;
+        meta.textContent = `Convex income accounts matched ${matchedPct}% of revenue (${matchedSkus}/${totalSkus} SKUs).`;
+    }
+}
+
 function renderPanelBreakdown(metrics) {
     const title = document.getElementById('panelMetricTitle');
     title.textContent = metricLabel(uiState.activeMetric);
@@ -1239,7 +1445,7 @@ function handleDriverClick(event) {
     const item = event.target.closest('.driver-item');
     if (!item) return;
     uiState.activeMetric = item.dataset.metric;
-    openPanel('channel');
+    openPanel(item.dataset.tab || 'channel');
 }
 
 async function handleSkuClick(event) {
@@ -1345,6 +1551,16 @@ function getDateRangeLabel(data) {
 
 function sum(data, key) {
     return data.reduce((total, item) => total + (Number(item[key]) || 0), 0);
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[char]));
 }
 
 function formatValue(value, format) {

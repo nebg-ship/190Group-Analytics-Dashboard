@@ -14,6 +14,7 @@ To ensure consistent year-over-year analysis, the following categories should be
 ## Reporting Logic
 
 - When calculating category-level performance, group the above categories together to avoid showing false drops or gains due to naming changes.
+- Executive dashboard top categories use Convex `inventory:listPartIncomeAccounts` income account data as the category source. When joining BigCommerce sales to Convex inventory, prefer variant SKU first, then product name, then product SKU. Amazon category coverage is lower until Amazon MSKUs are mapped to canonical inventory SKUs.
 
 ## SKU Mappings
 

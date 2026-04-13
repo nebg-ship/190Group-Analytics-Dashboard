@@ -946,6 +946,39 @@ export const listPartQuantities = query({
     },
 });
 
+export const listPartIncomeAccounts = query({
+    args: {
+        includeInactive: v.optional(v.boolean()),
+        limit: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const includeInactive = args.includeInactive ?? true;
+        const limit = Math.min(Math.max(Math.floor(args.limit ?? 20000), 1), 20000);
+        const parts = await ctx.db.query("inventory_parts").collect();
+
+        const rows = (includeInactive ? parts : parts.filter(isPartActive))
+            .map((part) => {
+                const incomeAccount = part.Account.trim() ? part.Account : part.Category;
+                return {
+                    sku: part.Sku,
+                    description: part.Description,
+                    category: incomeAccount,
+                    incomeAccount: part.Account,
+                    rawCategory: part.Category,
+                    active: isPartActive(part),
+                };
+            })
+            .sort((a, b) => a.sku.localeCompare(b.sku))
+            .slice(0, limit);
+
+        return {
+            rows,
+            totalRows: rows.length,
+            generatedAt: Date.now(),
+        };
+    },
+});
+
 export const getPartQuantitiesBySkus = query({
     args: {
         skus: v.array(v.string()),

@@ -1,7 +1,10 @@
 """
 CEO Dashboard API - Data endpoint for fetching combined Amazon + Bonsai metrics
 """
+import json
 import os
+import time
+import urllib.request
 from flask import Flask, jsonify, send_from_directory, request
 from flask_cors import CORS
 from google.cloud import bigquery
@@ -19,6 +22,7 @@ app.register_blueprint(inventory_api)
 
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent
+load_dotenv(PROJECT_ROOT / ".env.local", override=False)
 
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT')
 GA4_DATASET = os.getenv('GA4_DATASET')
@@ -26,6 +30,12 @@ SALES_DATASET = os.getenv('SALES_DATASET', 'sales')
 AMAZON_ECON_DATASET = os.getenv('AMAZON_ECON_DATASET') or os.getenv('BIGQUERY_DATASET', 'amazon_econ')
 WHOLESALE_DATASET = os.getenv('WHOLESALE_DATASET', 'wholesale')
 GOOGLE_ADS_DATASET = os.getenv('GOOGLE_ADS_DATASET', 'google_ads_190')
+CONVEX_CATEGORY_CACHE_TTL_SECONDS = 300
+CONVEX_CATEGORY_CACHE = {
+    'loaded_at': 0.0,
+    'categories': {},
+    'source': None,
+}
 
 # Hardwired BigCommerce line-item table + columns (per user confirmation)
 LINE_ITEMS_TABLE = 'bc_order_line_items'
@@ -37,6 +47,266 @@ LINE_ITEMS_TOTAL_COL = 'total_ex_tax'
 
 def get_bigquery_client():
     return bigquery.Client(project=PROJECT_ID)
+
+def normalize_sku(value):
+    return str(value or '').strip().upper()
+
+def convex_query(function_name, args_obj):
+    convex_url = os.getenv('CONVEX_URL', '').strip()
+    if not convex_url:
+        raise RuntimeError('CONVEX_URL is not configured. Start Convex locally or set the deployment URL.')
+
+    body = json.dumps({
+        'path': function_name,
+        'format': 'convex_encoded_json',
+        'args': [args_obj],
+    }).encode('utf-8')
+    req = urllib.request.Request(
+        f"{convex_url.rstrip('/')}/api/query",
+        data=body,
+        headers={
+            'Content-Type': 'application/json',
+            'Convex-Client': 'npm-1.31.7',
+        },
+        method='POST',
+    )
+
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        payload = json.loads(resp.read().decode('utf-8'))
+
+    if payload.get('status') != 'success':
+        raise RuntimeError(payload.get('errorMessage') or 'Convex query failed.')
+
+    return payload.get('value')
+
+def get_convex_category_map(force_refresh=False):
+    now = time.time()
+    cached_categories = CONVEX_CATEGORY_CACHE.get('categories') or {}
+    if (
+        not force_refresh
+        and cached_categories
+        and now - CONVEX_CATEGORY_CACHE.get('loaded_at', 0) < CONVEX_CATEGORY_CACHE_TTL_SECONDS
+    ):
+        return cached_categories
+
+    source = 'inventory:listPartIncomeAccounts'
+    try:
+        payload = convex_query(
+            source,
+            {'includeInactive': True, 'limit': 20000},
+        )
+    except Exception:
+        source = 'inventory:getInventoryOverview'
+        payload = convex_query(
+            source,
+            {'includeInactive': True, 'limit': 5000},
+        )
+    categories = {}
+    for row in (payload or {}).get('rows', []):
+        sku = normalize_sku(row.get('sku'))
+        category = str(row.get('incomeAccount') or row.get('category') or '').strip()
+        if sku and category:
+            categories[sku] = category
+
+    CONVEX_CATEGORY_CACHE.update({
+        'loaded_at': now,
+        'categories': categories,
+        'source': source,
+    })
+    return categories
+
+def query_sales_by_sku(client, start_date, end_date, channel='all'):
+    sku_expr = "UPPER(TRIM(COALESCE(NULLIF(v.variants_sku, ''), NULLIF(p.product_name, ''), NULLIF(p.sku, ''))))"
+    query = f"""
+        WITH bonsai AS (
+          SELECT
+            'bonsai' AS channel,
+            {sku_expr} AS sku,
+            ROUND(SUM(CAST(li.total_ex_tax AS FLOAT64)), 2) AS revenue,
+            SUM(CAST(li.quantity AS FLOAT64)) AS units,
+            ROUND(SUM(
+              CASE
+                WHEN CAST(li.base_cost_price AS FLOAT64) > 0 THEN CAST(li.base_cost_price AS FLOAT64) * li.quantity
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * li.quantity
+                ELSE 0
+              END
+            ), 2) AS cogs
+          FROM `{PROJECT_ID}.{SALES_DATASET}.bc_order_line_items` li
+          JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_order` o ON li.order_id = o.order_id
+          LEFT JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product` p ON li.product_id = p.product_id
+          LEFT JOIN `{PROJECT_ID}.{SALES_DATASET}.bc_product_variants` v
+            ON v.variants_id = li.variant_id AND v.product_id = li.product_id
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c
+            ON {sku_expr} = UPPER(TRIM(c.msku))
+          WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
+            AND o.order_status_id IN (2, 10, 11, 3)
+          GROUP BY 1, 2
+        ),
+        amazon AS (
+          SELECT
+            'amazon' AS channel,
+            UPPER(TRIM(a.msku)) AS sku,
+            ROUND(SUM(CAST(a.gross_sales AS FLOAT64)), 2) AS revenue,
+            SUM(CAST(a.units AS FLOAT64)) AS units,
+            ROUND(SUM(
+              CASE
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * a.units
+                ELSE 0
+              END
+            ), 2) AS cogs
+          FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_sku_day_us` a
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c
+            ON UPPER(TRIM(a.msku)) = UPPER(TRIM(c.msku))
+          WHERE a.business_date BETWEEN @start_date AND @end_date
+          GROUP BY 1, 2
+        ),
+        wholesale AS (
+          SELECT
+            'wholesale' AS channel,
+            {sku_expr} AS sku,
+            ROUND(SUM(CAST(li.total_ex_tax AS FLOAT64)), 2) AS revenue,
+            SUM(CAST(li.quantity AS FLOAT64)) AS units,
+            ROUND(SUM(
+              CASE
+                WHEN c.cost_per_unit IS NOT NULL THEN CAST(c.cost_per_unit AS FLOAT64) * li.quantity
+                WHEN CAST(li.base_cost_price AS FLOAT64) > 0 THEN CAST(li.base_cost_price AS FLOAT64) * li.quantity
+                ELSE 0
+              END
+            ), 2) AS cogs
+          FROM `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order_line_items` li
+          JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_order` o ON li.order_id = o.order_id
+          LEFT JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_product` p ON li.product_id = p.product_id
+          LEFT JOIN `{PROJECT_ID}.{WHOLESALE_DATASET}.bc_product_variants` v
+            ON v.variants_id = li.variant_id AND v.product_id = li.product_id
+          LEFT JOIN `{PROJECT_ID}.{AMAZON_ECON_DATASET}.dim_sku_costs_us` c
+            ON {sku_expr} = UPPER(TRIM(c.msku))
+          WHERE DATE(o.order_created_date_time) BETWEEN @start_date AND @end_date
+            AND o.order_status_id IN (2, 10)
+          GROUP BY 1, 2
+        ),
+        combined AS (
+          SELECT * FROM bonsai
+          UNION ALL
+          SELECT * FROM amazon
+          UNION ALL
+          SELECT * FROM wholesale
+        )
+        SELECT
+          sku,
+          ROUND(SUM(revenue), 2) AS revenue,
+          SUM(units) AS units,
+          ROUND(SUM(cogs), 2) AS cogs,
+          COUNT(DISTINCT channel) AS channel_count
+        FROM combined
+        WHERE sku IS NOT NULL
+          AND sku != ''
+          AND (@channel = 'all' OR channel = @channel)
+        GROUP BY 1
+        ORDER BY revenue DESC
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter('start_date', 'DATE', start_date),
+            bigquery.ScalarQueryParameter('end_date', 'DATE', end_date),
+            bigquery.ScalarQueryParameter('channel', 'STRING', channel),
+        ],
+        maximum_bytes_billed=250_000_000,
+    )
+    return [dict(row) for row in client.query(query, job_config=job_config).result()]
+
+def summarize_category_coverage(sku_rows, category_map):
+    total_revenue = 0.0
+    matched_revenue = 0.0
+    matched_skus = 0
+    unmapped_skus = 0
+    for row in sku_rows:
+        revenue = float(row.get('revenue') or 0)
+        total_revenue += revenue
+        if category_map.get(normalize_sku(row.get('sku'))):
+            matched_revenue += revenue
+            matched_skus += 1
+        else:
+            unmapped_skus += 1
+
+    return {
+        'total_skus': len(sku_rows),
+        'matched_skus': matched_skus,
+        'unmapped_skus': unmapped_skus,
+        'total_revenue': round(total_revenue, 2),
+        'matched_revenue': round(matched_revenue, 2),
+        'unmapped_revenue': round(total_revenue - matched_revenue, 2),
+        'matched_revenue_pct': round((matched_revenue / total_revenue * 100), 1) if total_revenue else 0,
+    }
+
+def aggregate_top_categories(current_rows, previous_rows, category_map, limit=8):
+    category_totals = {}
+
+    def ensure_category(category):
+        return category_totals.setdefault(category, {
+            'category': category,
+            'revenue': 0.0,
+            'units': 0.0,
+            'cogs': 0.0,
+            'previous_revenue': 0.0,
+            'previous_units': 0.0,
+            'previous_cogs': 0.0,
+            'sku_count': 0,
+            'previous_sku_count': 0,
+        })
+
+    for row in current_rows:
+        category = category_map.get(normalize_sku(row.get('sku')))
+        if not category:
+            continue
+        totals = ensure_category(category)
+        totals['revenue'] += float(row.get('revenue') or 0)
+        totals['units'] += float(row.get('units') or 0)
+        totals['cogs'] += float(row.get('cogs') or 0)
+        totals['sku_count'] += 1
+
+    for row in previous_rows:
+        category = category_map.get(normalize_sku(row.get('sku')))
+        if not category:
+            continue
+        totals = ensure_category(category)
+        totals['previous_revenue'] += float(row.get('revenue') or 0)
+        totals['previous_units'] += float(row.get('units') or 0)
+        totals['previous_cogs'] += float(row.get('cogs') or 0)
+        totals['previous_sku_count'] += 1
+
+    rows = []
+    for totals in category_totals.values():
+        revenue = totals['revenue']
+        cogs = totals['cogs']
+        previous_revenue = totals['previous_revenue']
+        previous_cogs = totals['previous_cogs']
+        profit = revenue - cogs
+        previous_profit = previous_revenue - previous_cogs
+        rows.append({
+            **totals,
+            'revenue': round(revenue, 2),
+            'units': round(totals['units'], 2),
+            'cogs': round(cogs, 2),
+            'profit': round(profit, 2),
+            'gm_pct': round((profit / revenue * 100), 1) if revenue else None,
+            'previous_revenue': round(previous_revenue, 2),
+            'previous_units': round(totals['previous_units'], 2),
+            'previous_cogs': round(previous_cogs, 2),
+            'previous_profit': round(previous_profit, 2),
+            'delta': round(revenue - previous_revenue, 2),
+            'delta_pct': round(((revenue - previous_revenue) / abs(previous_revenue) * 100), 1) if previous_revenue else None,
+        })
+
+    positive = [row for row in rows if row['delta'] > 0]
+    negative = [row for row in rows if row['delta'] < 0]
+    top_positive = max(positive, key=lambda row: row['delta'], default=None)
+    top_negative = min(negative, key=lambda row: row['delta'], default=None)
+
+    return {
+        'rows': sorted(rows, key=lambda row: row['revenue'], reverse=True)[:limit],
+        'top_positive': top_positive,
+        'top_negative': top_negative,
+    }
 
 def make_daily_dashboard_query(weekly_query):
     """Convert the main dashboard query from display buckets to exact day buckets."""
@@ -581,6 +851,58 @@ def get_top_skus_channel():
         return jsonify({
             'success': True,
             'data': skus,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/top-categories', methods=['GET'])
+def get_top_categories():
+    """Fetch top income-account categories using Convex inventory as the category source."""
+    try:
+        start_date = request.args.get('start')
+        end_date = request.args.get('end')
+        compare_start = request.args.get('compare_start')
+        compare_end = request.args.get('compare_end')
+        channel = request.args.get('channel', 'all')
+        try:
+            limit = min(max(int(request.args.get('limit', '8')), 1), 25)
+        except ValueError:
+            limit = 8
+
+        if not start_date or not end_date:
+            return jsonify({
+                'success': False,
+                'error': 'start and end query parameters are required (YYYY-MM-DD).'
+            }), 400
+
+        if channel not in {'all', 'bonsai', 'amazon', 'wholesale', 'retail'}:
+            return jsonify({
+                'success': False,
+                'error': 'channel must be one of: all, bonsai, amazon, wholesale, retail.'
+            }), 400
+
+        client = get_bigquery_client()
+        category_map = get_convex_category_map()
+        current_rows = query_sales_by_sku(client, start_date, end_date, channel)
+        previous_rows = (
+            query_sales_by_sku(client, compare_start, compare_end, channel)
+            if compare_start and compare_end
+            else []
+        )
+        categories = aggregate_top_categories(current_rows, previous_rows, category_map, limit=limit)
+
+        return jsonify({
+            'success': True,
+            'data': categories['rows'],
+            'top_positive': categories['top_positive'],
+            'top_negative': categories['top_negative'],
+            'coverage': summarize_category_coverage(current_rows, category_map),
+            'category_source': CONVEX_CATEGORY_CACHE.get('source'),
+            'channel': channel,
             'timestamp': datetime.now().isoformat()
         })
     except Exception as e:
