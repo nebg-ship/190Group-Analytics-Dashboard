@@ -55,4 +55,5 @@ Settlement reports contain many columns. We will prioritize:
 
 ## Notes
 - `--start_date` is applied client-side to the reports list using the report `createdTime` field.
+- **Catch-up after missed runs**: fetch a wider set of completed settlement reports and filter by report `createdTime`, e.g. `python execution/ingest_amazon_settlements.py --limit 100 --start_date 2026-02-01`. The script deduplicates by `settlement_id` before reloading. Recent posted dates can still look partial because settlement reports lag Amazon order activity.
 - The ingestion script “unpivots” each settlement row into component rows (`Price`, `Fee`, `Promotion`, `Other`) in BigQuery.

@@ -8,6 +8,7 @@ This document captures product/architecture decisions for the 190 Group “Execu
 - API: Flask app in `api/dashboard_data.py` queries BigQuery and serves JSON + static assets.
 - UI: static dashboard in `dashboard/` (Chart.js + custom UI).
 - Runner: `run_dashboard.py` starts the API and opens the dashboard in your browser.
+- Timeframes: dashboard trend rows can be weekly/month-split display buckets, but KPI and comparison math must use the API's `daily_data` rows so rolling ranges like Today, Last 7, Last 30, and Custom are exact calendar windows.
 
 ## Key decisions
 
@@ -54,6 +55,8 @@ Primary tables:
 - Smoke tests against the running API:
   - `python execution/verify_net_proceeds.py`
   - `python execution/verify_yoy.py`
+- Timeframe audit:
+  - `python execution/audit_dashboard_timeframes.py --as-of YYYY-MM-DD`
 
 ## Backlog (high-value improvements)
 

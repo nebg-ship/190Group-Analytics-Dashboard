@@ -66,6 +66,11 @@ The pipeline follows a "Bronze -> Silver" pattern to decouple ingestion from ana
     *   *Why*: catches late fee adjustments, reversals, and attribution updates common in financial data.
     *   *Mechanism*: `DELETE FROM fact_sku_day_us WHERE business_date BETWEEN <T-7> AND <T-1>` followed by `INSERT`.
 
+**Catch-up after missed runs**:
+- If the previous successful run is more than 7 days old, run a one-time wider backfill before checking dashboard KPIs.
+- Example: if today is 2026-04-13 and April 1-5 is missing, run `python execution/ingest_amazon_economics.py --backfill-days 12` to reload April 1 through April 12.
+- Validate with a daily BigQuery total against Seller Central. The most recent calendar day can lag or return zero in Data Kiosk even when Seller Central UI has a number; note that separately rather than treating the whole backfill as failed.
+
 ## 4. Operational Table: `etl_runs`
 Tracks the health and history of every ingestion job.
 
@@ -99,3 +104,4 @@ Pipeline **must** fail or alert if these conditions are not met.
 ## Smoke test
 - Start the API/dashboard: `python run_dashboard.py`
 - Verify Amazon net proceeds is present: `python execution/verify_net_proceeds.py`
+- Audit exact dashboard KPI windows against daily Amazon economics/business-report totals: `python execution/audit_dashboard_timeframes.py --as-of YYYY-MM-DD`

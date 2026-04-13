@@ -69,6 +69,7 @@ The `GET_SALES_AND_TRAFFIC_REPORT` provides a broad range of metrics. We will fo
 ## Orchestration
 - **Frequency**: Daily.
 - **Backfill**: 7 days rolling window to ensure data stability (Amazon reports can take 24-48h to fully stabilize).
+- **Catch-up after missed runs**: if the previous successful run is more than 7 days old, run a wider one-time catch-up, e.g. `python execution/ingest_amazon_business_reports.py --days 12` on 2026-04-13 to request April 1 through April 12. Amazon may return no SKU-level rows for the newest day even when Seller Central UI already shows revenue; re-run that day after the report stabilizes.
 
 ## Smoke test
 - Start the API/dashboard: `python run_dashboard.py`

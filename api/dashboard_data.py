@@ -38,6 +38,26 @@ LINE_ITEMS_TOTAL_COL = 'total_ex_tax'
 def get_bigquery_client():
     return bigquery.Client(project=PROJECT_ID)
 
+def make_daily_dashboard_query(weekly_query):
+    """Convert the main dashboard query from display buckets to exact day buckets."""
+    replacements = {
+        "GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), MONTH))": "DATE(o.order_created_date_time)",
+        "GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), MONTH))": "DATE(order_created_date_time)",
+        "GREATEST(DATE_TRUNC(DATE(business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(business_date), MONTH))": "DATE(business_date)",
+        "GREATEST(DATE_TRUNC(DATE(report_date), WEEK(MONDAY)), DATE_TRUNC(DATE(report_date), MONTH))": "DATE(report_date)",
+        "GREATEST(DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)), DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), MONTH))": "PARSE_DATE('%Y%m%d', event_date)",
+        "GREATEST(DATE_TRUNC(hb.`date`, WEEK(MONDAY)), DATE_TRUNC(hb.`date`, MONTH))": "hb.`date`",
+        "GREATEST(DATE_TRUNC(DATE(posted_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(posted_date_time), MONTH))": "DATE(posted_date_time)",
+        "GREATEST(DATE_TRUNC(DATE(segments_date), WEEK(MONDAY)), DATE_TRUNC(DATE(segments_date), MONTH))": "DATE(segments_date)",
+        "GREATEST(DATE_TRUNC(DATE(a.business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(a.business_date), MONTH))": "DATE(a.business_date)",
+    }
+
+    daily_query = weekly_query
+    for bucket_expr, day_expr in replacements.items():
+        daily_query = daily_query.replace(bucket_expr, day_expr)
+
+    return daily_query.replace("LIMIT 100", "LIMIT 800")
+
 def query_top_sku(client, start_date, end_date, compare_start=None, compare_end=None):
     base_query = f"""
         SELECT
@@ -119,7 +139,7 @@ def get_dashboard_data():
         ),
         bonsai_weekly_types AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(o.order_created_date_time)) as year,
             COUNT(DISTINCT IF(DATE(o.order_created_date_time) = DATE(c.first_order_date), o.customer_id, NULL)) as new_customers,
             COUNT(DISTINCT IF(DATE(o.order_created_date_time) > DATE(c.first_order_date), o.customer_id, NULL)) as returning_customers
@@ -131,8 +151,8 @@ def get_dashboard_data():
         ),
         bonsai_weekly AS (
           SELECT
-            -- Split week at year boundary for accurate YTD sums
-            GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), YEAR)) as week_start,
+            -- Split weeks at month boundaries for accurate MTD/QTD sums
+            GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(order_created_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders,
             ROUND(SUM(CAST(total_excluding_tax AS FLOAT64)), 2) as total_revenue,
@@ -147,7 +167,7 @@ def get_dashboard_data():
         amazon_weekly AS (
           SELECT 
             -- Align daily data to the same Monday-start weeks as Bonsai
-            GREATEST(DATE_TRUNC(DATE(business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(business_date), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(business_date), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(business_date)) as year,
             ROUND(SUM(CAST(gross_sales AS FLOAT64)), 2) as total_sales,
             SUM(units) as total_units,
@@ -159,7 +179,7 @@ def get_dashboard_data():
         ),
         amazon_traffic_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(report_date), WEEK(MONDAY)), DATE_TRUNC(DATE(report_date), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(report_date), WEEK(MONDAY)), DATE_TRUNC(DATE(report_date), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(report_date)) as year,
             SUM(sessions) as sessions
           FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_business_reports_us`
@@ -179,7 +199,7 @@ def get_dashboard_data():
           FROM (
             -- Live BigQuery Export Data (where available)
             SELECT
-              GREATEST(DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)), DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), YEAR)) as week_start,
+              GREATEST(DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)), DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), MONTH)) as week_start,
               EXTRACT(YEAR FROM PARSE_DATE('%Y%m%d', event_date)) as year,
               COUNTIF(event_name = 'session_start') as sessions,
               COUNT(DISTINCT user_pseudo_id) as users,
@@ -215,7 +235,7 @@ def get_dashboard_data():
             -- Backfilled Historical Data (Full year 2025)
             -- We only use backfill data for dates where the BQ export is missing or incomplete
             SELECT
-              GREATEST(DATE_TRUNC(hb.`date`, WEEK(MONDAY)), DATE_TRUNC(hb.`date`, YEAR)) as week_start,
+              GREATEST(DATE_TRUNC(hb.`date`, WEEK(MONDAY)), DATE_TRUNC(hb.`date`, MONTH)) as week_start,
               EXTRACT(YEAR FROM hb.`date`) as year,
               SUM(hb.sessions) as sessions,
               SUM(hb.users) as users,
@@ -230,7 +250,7 @@ def get_dashboard_data():
         ),
         amazon_orders_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(posted_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(posted_date_time), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(posted_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(posted_date_time), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(posted_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders
           FROM `{PROJECT_ID}.{AMAZON_ECON_DATASET}.fact_settlements_us`
@@ -239,7 +259,7 @@ def get_dashboard_data():
         ),
         wholesale_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(order_created_date_time), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(order_created_date_time)) as year,
             COUNT(DISTINCT order_id) as total_orders,
             ROUND(SUM(IF(order_status_id IN (2, 10), CAST(sub_total_excluding_tax AS FLOAT64), 0)), 2) as total_revenue,
@@ -251,7 +271,7 @@ def get_dashboard_data():
         ),
         google_ads_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(segments_date), WEEK(MONDAY)), DATE_TRUNC(DATE(segments_date), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(segments_date), WEEK(MONDAY)), DATE_TRUNC(DATE(segments_date), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(segments_date)) as year,
             ROUND(SUM(CAST(metrics_cost_micros AS FLOAT64)) / 1000000, 2) as total_ad_spend
           FROM `{PROJECT_ID}.{GOOGLE_ADS_DATASET}.p_ads_CampaignStats_*`
@@ -262,7 +282,7 @@ def get_dashboard_data():
         -- Falls back to dim_sku_costs_us lookup when base_cost_price is 0
         bonsai_cogs_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(o.order_created_date_time)) as year,
             ROUND(SUM(
               CASE
@@ -282,7 +302,7 @@ def get_dashboard_data():
         -- COGS: Amazon channel - join daily SKU data with cost lookup
         amazon_cogs_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(a.business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(a.business_date), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(a.business_date), WEEK(MONDAY)), DATE_TRUNC(DATE(a.business_date), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(a.business_date)) as year,
             ROUND(SUM(
               CASE
@@ -298,7 +318,7 @@ def get_dashboard_data():
         -- COGS: Wholesale channel - use BigCommerce line items from wholesale dataset
         wholesale_cogs_weekly AS (
           SELECT
-            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), YEAR)) as week_start,
+            GREATEST(DATE_TRUNC(DATE(o.order_created_date_time), WEEK(MONDAY)), DATE_TRUNC(DATE(o.order_created_date_time), MONTH)) as week_start,
             EXTRACT(YEAR FROM DATE(o.order_created_date_time)) as year,
             ROUND(SUM(
               CASE
@@ -392,7 +412,10 @@ def get_dashboard_data():
         LIMIT 100
         """
         
+        daily_query = make_daily_dashboard_query(query)
+
         query_job = client.query(query)
+        daily_query_job = client.query(daily_query)
         # BigQuery does not support multiple result sets in one query execution directly via the standard client.query() returning an iterator for each.
         # However, we can execute the CTEs.
         # Actually, best practice to get two different datasets is two queries or array agg.
@@ -405,6 +428,7 @@ def get_dashboard_data():
         
         # Execute Main Query
         results = query_job.result()
+        daily_results = daily_query_job.result()
         
         # Fetch Top Wholesale Customers separately to keep it clean
         customer_query = f"""
@@ -430,6 +454,10 @@ def get_dashboard_data():
         data = []
         for row in results:
             data.append(dict(row))
+
+        daily_data = []
+        for row in daily_results:
+            daily_data.append(dict(row))
             
         wholesale_customers = []
         for row in customer_results:
@@ -438,6 +466,7 @@ def get_dashboard_data():
         return jsonify({
             'success': True,
             'data': data,
+            'daily_data': daily_data,
             'wholesale_customers': wholesale_customers,
             'timestamp': datetime.now().isoformat()
         })

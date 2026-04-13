@@ -1,10 +1,11 @@
 // Executive Overview Dashboard JS
 
-const API_URL = 'http://localhost:5000/api/dashboard';
-const TOP_SKU_URL = 'http://localhost:5000/api/top-sku';
+const API_URL = '/api/dashboard';
+const TOP_SKU_URL = '/api/top-sku';
 const NOTES_STORAGE_KEY = 'executive_notes_v1';
 
 let dashboardData = [];
+let dailyDashboardData = [];
 let charts = {};
 let currentAlerts = [];
 let latestMetrics = null;
@@ -32,7 +33,8 @@ const uiState = {
 
 const KPI_CONFIG = {
     total_revenue: { valueId: 'kpiTotalRevenue', metaId: 'kpiTotalRevenueMeta', format: 'currency' },
-    net_revenue: { valueId: 'kpiNetRevenue', metaId: 'kpiNetRevenueMeta', format: 'currency' },
+    net_revenue: { valueId: 'kpiNetRevenue', metaId: 'kpiNetRevenueMeta', format: 'currency', hiddenChannels: ['amazon'] },
+    gross_revenue: { valueId: 'kpiGrossRevenue', metaId: 'kpiGrossRevenueMeta', format: 'currency', channels: ['amazon'] },
     future_revenue: { valueId: 'kpiFutureRevenue', metaId: 'kpiFutureRevenueMeta', format: 'currency' },
     gross_profit: { valueId: 'kpiGrossProfit', metaId: 'kpiGrossProfitMeta', format: 'currency' },
     contribution_margin: { valueId: 'kpiContributionMargin', metaId: 'kpiContributionMarginMeta', format: 'percent', deltaFormat: 'pp' },
@@ -69,6 +71,11 @@ function setupEventListeners() {
 
     bindSelect('filterChannel', (value) => {
         uiState.channel = value;
+        if (value === 'amazon' && uiState.activeMetric === 'net_revenue') {
+            uiState.activeMetric = 'gross_revenue';
+        } else if (value !== 'amazon' && uiState.activeMetric === 'gross_revenue') {
+            uiState.activeMetric = 'net_revenue';
+        }
         toggleCustomerTypeVisibility(value);
         updateDashboard();
     });
@@ -214,6 +221,9 @@ async function loadDashboardData() {
 
         if (result.success && Array.isArray(result.data) && result.data.length > 0) {
             dashboardData = result.data;
+            dailyDashboardData = Array.isArray(result.daily_data) && result.daily_data.length > 0
+                ? result.daily_data
+                : result.data;
             wholesaleCustomersData = result.wholesale_customers || [];
             updateLastUpdated(result.timestamp);
             updateDashboard();
@@ -238,12 +248,15 @@ function updateLastUpdated(timestamp) {
 function updateDashboard() {
     if (!dashboardData.length) return;
 
-    const filteredData = filterDataByRange(dashboardData, uiState);
+    const hasDailyData = dailyDashboardData.length > 0;
+    const metricSourceData = hasDailyData ? dailyDashboardData : dashboardData;
+    const metricGrain = hasDailyData ? 'day' : 'week';
+    const filteredData = filterDataByRange(dashboardData, uiState, 'week');
+    const filteredMetricData = filterDataByRange(metricSourceData, uiState, metricGrain);
 
-    // For KPIs and comparison, use completed weeks only in standard cumulative ranges (YTD, MTD, QTD)
-    // to ensure a fair "at this time" comparison with previous periods.
-    const kpiData = getKpiData(filteredData, uiState.dateRange);
-    const comparisonData = getComparisonData(kpiData, dashboardData, uiState);
+    // Use exact daily rows for KPIs/comparisons; trim incomplete weeks for YTD/MTD/QTD fairness.
+    const kpiData = getKpiData(filteredMetricData, uiState.dateRange, metricGrain);
+    const comparisonData = getComparisonData(kpiData, metricSourceData, uiState);
     const metrics = computeMetrics(kpiData, comparisonData, uiState);
     latestMetrics = metrics;
 
@@ -253,15 +266,15 @@ function updateDashboard() {
     renderDecompositionChart(metrics);
     renderChannelEfficiencyTable(metrics);
     renderDrivers(metrics, topSkuData);
-    updateTopSkuData(kpiData, comparisonData);
-    updateTopSkusChannelData(kpiData);
+    updateTopSkuData(kpiData, comparisonData, metricGrain);
+    updateTopSkusChannelData(kpiData, metricGrain);
     renderAlerts(metrics);
     renderPanelBreakdown(metrics);
     renderWholesaleCustomers(wholesaleCustomersData);
 }
 
-function updateTopSkusChannelData(filteredData) {
-    const range = getWeekRange(filteredData);
+function updateTopSkusChannelData(filteredData, grain = 'week') {
+    const range = getWeekRange(filteredData, grain);
     if (!range) return;
 
     fetchTopSkusChannel(range);
@@ -274,7 +287,7 @@ async function fetchTopSkusChannel(range) {
     });
 
     try {
-        const response = await fetch(`http://localhost:5000/api/top-skus-channel?${params.toString()}`);
+        const response = await fetch(`/api/top-skus-channel?${params.toString()}`);
         const result = await response.json();
         if (result.success) {
             renderTopSkusByChannel(result.data);
@@ -348,10 +361,10 @@ function renderWholesaleCustomers(customers) {
     }).join('');
 }
 
-function updateTopSkuData(filteredData, comparisonData) {
-    const currentRange = getWeekRange(filteredData);
+function updateTopSkuData(filteredData, comparisonData, grain = 'week') {
+    const currentRange = getWeekRange(filteredData, grain);
     if (!currentRange) return;
-    const comparisonRange = getWeekRange(comparisonData);
+    const comparisonRange = getWeekRange(comparisonData, grain);
 
     const requestKey = [
         currentRange.start,
@@ -403,73 +416,105 @@ async function fetchTopSku(currentRange, comparisonRange, requestKey) {
     }
 }
 
-function getWeekRange(data) {
+function getWeekRange(data, grain = 'week') {
     if (!data || !data.length) return null;
     const sorted = sortByDateDesc(data);
     const latest = sorted[0];
     const earliest = sorted[sorted.length - 1];
     const start = earliest.week_start;
-    const end = addDays(latest.week_start, 6);
+    const end = grain === 'day' ? latest.week_start : getBucketEnd(latest.week_start);
     return { start, end };
 }
 
 function addDays(dateString, days) {
-    const date = new Date(`${dateString}T00:00:00Z`);
+    const date = parseDateString(dateString);
     date.setUTCDate(date.getUTCDate() + days);
+    return formatUtcDate(date);
+}
+
+function parseDateString(dateString) {
+    const [year, month, day] = dateString.split('-').map(Number);
+    return new Date(Date.UTC(year, month - 1, day));
+}
+
+function formatUtcDate(date) {
     return date.toISOString().slice(0, 10);
 }
 
-function filterDataByRange(data, state) {
-    const sorted = sortByDateDesc(data);
+function getTodayDateString() {
     const now = new Date();
-    const currentYear = now.getFullYear();
-    const currentMonth = now.getMonth();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function getRangeBounds(state) {
+    const today = getTodayDateString();
+    const [year, month] = today.split('-').map(Number);
 
     switch (state.dateRange) {
         case 'today':
-            return sorted.slice(0, 1);
+            return { start: today, end: today };
         case 'last7':
-            return sorted.slice(0, 1);
+            return { start: addDays(today, -6), end: today };
         case 'last30':
-            return sorted.slice(0, 4);
+            return { start: addDays(today, -29), end: today };
         case 'mtd':
-            return sorted.filter(item => {
-                const date = new Date(item.week_start + 'T00:00:00Z');
-                return date.getUTCFullYear() === currentYear && date.getUTCMonth() === currentMonth;
-            });
+            return { start: `${year}-${String(month).padStart(2, '0')}-01`, end: today };
         case 'qtd': {
-            const currentQuarter = Math.floor(currentMonth / 3);
-            return sorted.filter(item => {
-                const date = new Date(item.week_start + 'T00:00:00Z');
-                return date.getUTCFullYear() === currentYear && Math.floor(date.getUTCMonth() / 3) === currentQuarter;
-            });
+            const quarterStartMonth = Math.floor((month - 1) / 3) * 3 + 1;
+            return { start: `${year}-${String(quarterStartMonth).padStart(2, '0')}-01`, end: today };
         }
         case 'custom': {
-            if (!state.customRange.start || !state.customRange.end) return sorted.slice(0, 4);
-            const start = new Date(state.customRange.start);
-            const end = new Date(state.customRange.end);
-            return sorted.filter(item => {
-                const date = new Date(item.week_start + 'T00:00:00Z');
-                return date >= start && date <= end;
-            });
+            if (!state.customRange.start || !state.customRange.end) {
+                return { start: addDays(today, -29), end: today };
+            }
+            return { start: state.customRange.start, end: state.customRange.end };
         }
         case 'ytd':
         default:
-            return sorted.filter(item => Number(item.year) === currentYear);
+            return { start: `${year}-01-01`, end: today };
     }
+}
+
+function getMonthEnd(dateString) {
+    const [year, month] = dateString.split('-').map(Number);
+    return formatUtcDate(new Date(Date.UTC(year, month, 0)));
+}
+
+function getBucketEnd(dateString) {
+    const weekEnd = addDays(dateString, 6);
+    const monthEnd = getMonthEnd(dateString);
+    return weekEnd < monthEnd ? weekEnd : monthEnd;
+}
+
+function filterDataByRange(data, state, grain = 'week') {
+    const sorted = sortByDateDesc(data);
+    const range = getRangeBounds(state);
+
+    return sorted.filter(item => {
+        const itemStart = item.week_start;
+        const itemEnd = grain === 'day' ? item.week_start : getBucketEnd(item.week_start);
+        return itemEnd >= range.start && itemStart <= range.end;
+    });
 }
 
 /**
  * Returns a subset of data excluding the current incomplete week for headline KPIs.
  * This ensures fair comparisons for YTD/MTD/QTD views.
  */
-function getKpiData(data, range) {
+function getKpiData(data, range, grain = 'week') {
     if (!data.length) return data;
 
     if (['ytd', 'mtd', 'qtd'].includes(range)) {
         const sorted = sortByDateDesc(data);
         const latest = sorted[0];
         const startOfThisWeek = getStartOfCurrentWeek();
+
+        if (grain === 'day') {
+            return sorted.filter(item => item.week_start < startOfThisWeek);
+        }
 
         if (latest.week_start === startOfThisWeek) {
             return sorted.slice(1);
@@ -479,11 +524,11 @@ function getKpiData(data, range) {
 }
 
 function getStartOfCurrentWeek() {
-    const now = new Date();
+    const now = parseDateString(getTodayDateString());
     const day = now.getUTCDay();
     const diff = (day === 0 ? -6 : 1) - day;
     const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + diff));
-    return monday.toISOString().slice(0, 10);
+    return formatUtcDate(monday);
 }
 
 function getComparisonData(selectedData, allData, state) {
@@ -623,6 +668,7 @@ function computeSelectedMetrics(totals, channel) {
         case 'amazon':
             return {
                 total_revenue: null,
+                gross_revenue: totals.amazonRevenue,
                 net_revenue: totals.amazonRevenue,
                 gross_profit: totals.channels.amazon.profit,
                 contribution_margin: totals.channels.amazon.gmPct,
@@ -636,6 +682,7 @@ function computeSelectedMetrics(totals, channel) {
         case 'bonsai':
             return {
                 total_revenue: null,
+                gross_revenue: null,
                 net_revenue: totals.bonsaiRevenue,
                 gross_profit: totals.channels.bonsai.profit,
                 contribution_margin: totals.channels.bonsai.gmPct,
@@ -647,6 +694,7 @@ function computeSelectedMetrics(totals, channel) {
         case 'wholesale':
             return {
                 total_revenue: (totals.wholesaleRevenue || 0) + (totals.wholesaleFutureRevenue || 0),
+                gross_revenue: null,
                 net_revenue: totals.wholesaleRevenue,
                 gross_profit: totals.channels.wholesale.profit,
                 contribution_margin: totals.channels.wholesale.gmPct,
@@ -657,6 +705,7 @@ function computeSelectedMetrics(totals, channel) {
             };
         case 'retail':
             return {
+                gross_revenue: null,
                 net_revenue: null,
                 gross_profit: null,
                 contribution_margin: null,
@@ -668,6 +717,7 @@ function computeSelectedMetrics(totals, channel) {
         default:
             return {
                 total_revenue: null,
+                gross_revenue: null,
                 net_revenue: totals.totalRevenue,
                 gross_profit: totals.estimatedProfit,
                 contribution_margin: totals.contributionMargin,
@@ -686,10 +736,18 @@ function renderKpis(metrics, state) {
         const config = KPI_CONFIG[key];
         const valueEl = document.getElementById(config.valueId);
         const metaEl = document.getElementById(config.metaId);
+        const tile = valueEl.closest('.kpi-tile');
+        const hiddenForChannel = (config.channels && !config.channels.includes(state.channel))
+            || (config.hiddenChannels && config.hiddenChannels.includes(state.channel));
+
+        if (hiddenForChannel) {
+            tile.classList.add('hidden');
+            return;
+        }
+
         const currentValue = metrics.selected[key];
         const previousValue = metrics.selectedPrev[key];
 
-        const tile = valueEl.closest('.kpi-tile');
         if (currentValue === null || currentValue === undefined) {
             tile.classList.add('hidden');
             valueEl.textContent = 'N/A';
@@ -1084,6 +1142,8 @@ function getChannelMetricValue(channelKey, metrics, metric) {
     const channel = metrics.currentTotals.channels[channelKey];
     if (!channel) return null;
     switch (metric) {
+        case 'gross_revenue':
+            return channelKey === 'amazon' ? metrics.currentTotals.amazonRevenue : null;
         case 'net_revenue':
             return channel.revenue;
         case 'gross_profit':
@@ -1109,7 +1169,7 @@ function formatPanelValue(value, metric) {
     if (metric === 'orders' || metric === 'units') {
         return formatNumber(value);
     }
-    if (metric === 'aov' || metric === 'net_revenue' || metric === 'gross_profit') {
+    if (metric === 'aov' || metric === 'gross_revenue' || metric === 'net_revenue' || metric === 'gross_profit') {
         return formatCurrency(value);
     }
     return formatValue(value, 'text');
@@ -1145,7 +1205,10 @@ function addNote() {
     const text = input.value.trim();
     if (!text) return;
 
-    const rangeLabel = getDateRangeLabel(filterDataByRange(dashboardData, uiState));
+    const hasDailyData = dailyDashboardData.length > 0;
+    const metricSourceData = hasDailyData ? dailyDashboardData : dashboardData;
+    const metricGrain = hasDailyData ? 'day' : 'week';
+    const rangeLabel = getDateRangeLabel(filterDataByRange(metricSourceData, uiState, metricGrain));
     const notes = loadNotes();
     notes.unshift({
         id: Date.now(),
@@ -1194,7 +1257,10 @@ async function handleSkuClick(event) {
     const list = document.getElementById('panelVariationBreakdown');
     list.innerHTML = '<div class="panel-placeholder">Loading variation breakdown...</div>';
 
-    const range = getWeekRange(filterDataByRange(dashboardData, uiState));
+    const hasDailyData = dailyDashboardData.length > 0;
+    const metricSourceData = hasDailyData ? dailyDashboardData : dashboardData;
+    const metricGrain = hasDailyData ? 'day' : 'week';
+    const range = getWeekRange(filterDataByRange(metricSourceData, uiState, metricGrain), metricGrain);
     if (!range) return;
 
     const params = new URLSearchParams({
@@ -1204,7 +1270,7 @@ async function handleSkuClick(event) {
     });
 
     try {
-        const response = await fetch(`http://localhost:5000/api/sku-variations?${params.toString()}`);
+        const response = await fetch(`/api/sku-variations?${params.toString()}`);
         const result = await response.json();
         if (result.success) {
             renderVariationBreakdown(result.data);
@@ -1246,6 +1312,8 @@ function handleAlertClick(event) {
 
 function metricLabel(metric) {
     switch (metric) {
+        case 'gross_revenue':
+            return 'Gross Revenue';
         case 'gross_profit':
             return 'Estimated Gross Profit';
         case 'contribution_margin':
@@ -1268,10 +1336,11 @@ function metricLabel(metric) {
 
 function getDateRangeLabel(data) {
     if (!data.length) return 'No data';
-    const dates = data.map(item => new Date(item.week_start + 'T00:00:00Z')).sort((a, b) => a - b);
+    const dates = data.map(item => parseDateString(item.week_start)).sort((a, b) => a - b);
     const start = dates[0];
     const end = dates[dates.length - 1];
-    return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+    const options = { month: 'short', day: 'numeric', timeZone: 'UTC' };
+    return `${start.toLocaleDateString('en-US', options)} - ${end.toLocaleDateString('en-US', options)}`;
 }
 
 function sum(data, key) {
@@ -1342,8 +1411,8 @@ function formatPpDelta(value) {
 }
 
 function formatDate(dateString) {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const date = parseDateString(dateString);
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 function formatDateTime(dateString) {
@@ -1401,7 +1470,7 @@ function hexToRgba(hex, alpha) {
 
 // ── P&L Dashboard ────────────────────────────────────────────────
 
-const PL_API_URL = 'http://localhost:5000/api/pl';
+const PL_API_URL = '/api/pl';
 let plData = null;
 
 async function loadPLData() {

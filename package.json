@@ -3,6 +3,8 @@
     "xlsx": "^0.18.5"
   },
   "scripts": {
+    "dev": "python run_dashboard.py",
+    "start": "python run_dashboard.py",
     "convex:mcp": "npx convex mcp start"
   },
   "devDependencies": {
